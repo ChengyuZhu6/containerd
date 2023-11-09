@@ -291,14 +291,14 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		}
 	}()
 
-	// newCtx, cancel := context.WithTimeout(ctx, 500*time.Second)
-	// if cancel != nil {
-	// 	defer cancel()
-	// }
-	log.G(ctx).Infof("func (c *Client) NewContainer before NewContainer")
+	newCtx, cancel := context.WithTimeout(ctx, 500*time.Second)
+	if cancel != nil {
+		defer cancel()
+	}
+	log.G(newCtx).Infof("func (c *Client) NewContainer before NewContainer")
 
 	var cntr containerd.Container
-	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {
+	if cntr, err = c.client.NewContainer(newCtx, id, opts...); err != nil {
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
 	}
 	defer func() {
@@ -306,7 +306,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			deferCtx, deferCancel := util.DeferContext()
 			defer deferCancel()
 			if err := cntr.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
+				log.G(newCtx).WithError(err).Errorf("Failed to delete containerd container %q", id)
 			}
 		}
 	}()
@@ -325,7 +325,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		if retErr != nil {
 			// Cleanup container checkpoint on error.
 			if err := container.Delete(); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to cleanup container checkpoint for %q", id)
+				log.G(newCtx).WithError(err).Errorf("Failed to cleanup container checkpoint for %q", id)
 			}
 		}
 	}()
@@ -335,11 +335,11 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, fmt.Errorf("failed to add container %q into store: %w", id, err)
 	}
 
-	c.generateAndSendContainerEvent(ctx, id, sandboxID, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
+	c.generateAndSendContainerEvent(newCtx, id, sandboxID, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
 
-	err = c.nri.PostCreateContainer(ctx, &sandbox, &container)
+	err = c.nri.PostCreateContainer(newCtx, &sandbox, &container)
 	if err != nil {
-		log.G(ctx).WithError(err).Errorf("NRI post-create notification failed")
+		log.G(newCtx).WithError(err).Errorf("NRI post-create notification failed")
 	}
 
 	containerCreateTimer.WithValues(ociRuntime.Type).UpdateSince(start)
