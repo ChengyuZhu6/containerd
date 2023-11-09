@@ -26,7 +26,6 @@ import (
 	"github.com/containerd/containerd/v2/errdefs"
 	"github.com/containerd/containerd/v2/protobuf"
 	ptypes "github.com/containerd/containerd/v2/protobuf/types"
-	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -114,7 +113,6 @@ func (r *remoteContainers) Create(ctx context.Context, container containers.Cont
 		Container: containerToProto(&container),
 	})
 	if err != nil {
-		log.G(ctx).Infof("func (r *remoteContainers) Create err = %v", errdefs.FromGRPC(err))
 		return containers.Container{}, errdefs.FromGRPC(err)
 	}
 
