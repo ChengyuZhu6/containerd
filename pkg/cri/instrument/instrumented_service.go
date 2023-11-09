@@ -19,6 +19,7 @@ package instrument
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/containerd/containerd/v2/errdefs"
 	"github.com/containerd/containerd/v2/tracing"
@@ -168,16 +169,22 @@ func (in *instrumentedService) CreateContainer(ctx context.Context, r *runtime.C
 	}
 	log.G(ctx).Infof("CreateContainer within sandbox %q for container %+v",
 		r.GetPodSandboxId(), r.GetConfig().GetMetadata())
+	newCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
+
+	if cancel != nil {
+		defer cancel()
+	}
+
 	defer func() {
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("CreateContainer within sandbox %q for %+v failed",
+			log.G(newCtx).WithError(err).Errorf("CreateContainer within sandbox %q for %+v failed",
 				r.GetPodSandboxId(), r.GetConfig().GetMetadata())
 		} else {
-			log.G(ctx).Infof("CreateContainer within sandbox %q for %+v returns container id %q",
+			log.G(newCtx).Infof("CreateContainer within sandbox %q for %+v returns container id %q",
 				r.GetPodSandboxId(), r.GetConfig().GetMetadata(), res.GetContainerId())
 		}
 	}()
-	res, err = in.c.CreateContainer(ctrdutil.WithNamespace(ctx), r)
+	res, err = in.c.CreateContainer(ctrdutil.WithNamespace(newCtx), r)
 	return res, errdefs.ToGRPC(err)
 }
 

@@ -120,6 +120,8 @@ func (c *CRIImageService) PullImage(ctx context.Context, r *runtime.PullImageReq
 	}
 
 	imagePullProgressTimeout, err := time.ParseDuration(c.config.ImagePullProgressTimeout)
+	log.G(ctx).Debugf("PullImage using ImagePullProgressTimeout: %q", imagePullProgressTimeout)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse image_pull_progress_timeout %q: %w", c.config.ImagePullProgressTimeout, err)
 	}
@@ -183,7 +185,11 @@ func (c *CRIImageService) PullImage(ctx context.Context, r *runtime.PullImageReq
 	}
 
 	pullReporter.start(pctx)
-	image, err := c.client.Pull(pctx, ref, pullOpts...)
+	newCtx, cancel := context.WithTimeout(pctx, 300*time.Second)
+	if cancel != nil {
+		defer cancel()
+	}
+	image, err := c.client.Pull(newCtx, ref, pullOpts...)
 	pcancel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)

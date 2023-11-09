@@ -14,52 +14,53 @@
    limitations under the License.
 */
 
-package client
+package containerd
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	containersapi "github.com/containerd/containerd/v2/api/services/containers/v1"
-	contentapi "github.com/containerd/containerd/v2/api/services/content/v1"
-	diffapi "github.com/containerd/containerd/v2/api/services/diff/v1"
-	eventsapi "github.com/containerd/containerd/v2/api/services/events/v1"
-	imagesapi "github.com/containerd/containerd/v2/api/services/images/v1"
-	introspectionapi "github.com/containerd/containerd/v2/api/services/introspection/v1"
-	leasesapi "github.com/containerd/containerd/v2/api/services/leases/v1"
-	namespacesapi "github.com/containerd/containerd/v2/api/services/namespaces/v1"
-	sandboxsapi "github.com/containerd/containerd/v2/api/services/sandbox/v1"
-	snapshotsapi "github.com/containerd/containerd/v2/api/services/snapshots/v1"
-	"github.com/containerd/containerd/v2/api/services/tasks/v1"
-	versionservice "github.com/containerd/containerd/v2/api/services/version/v1"
-	apitypes "github.com/containerd/containerd/v2/api/types"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/content"
-	contentproxy "github.com/containerd/containerd/v2/content/proxy"
-	"github.com/containerd/containerd/v2/defaults"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/events"
-	"github.com/containerd/containerd/v2/images"
-	"github.com/containerd/containerd/v2/leases"
-	leasesproxy "github.com/containerd/containerd/v2/leases/proxy"
-	"github.com/containerd/containerd/v2/namespaces"
-	"github.com/containerd/containerd/v2/pkg/dialer"
-	"github.com/containerd/containerd/v2/platforms"
-	"github.com/containerd/containerd/v2/plugins"
-	ptypes "github.com/containerd/containerd/v2/protobuf/types"
-	"github.com/containerd/containerd/v2/remotes"
-	"github.com/containerd/containerd/v2/remotes/docker"
-	"github.com/containerd/containerd/v2/sandbox"
-	sandboxproxy "github.com/containerd/containerd/v2/sandbox/proxy"
-	"github.com/containerd/containerd/v2/services/introspection"
-	"github.com/containerd/containerd/v2/snapshots"
-	snproxy "github.com/containerd/containerd/v2/snapshots/proxy"
+	containersapi "github.com/containerd/containerd/api/services/containers/v1"
+	contentapi "github.com/containerd/containerd/api/services/content/v1"
+	diffapi "github.com/containerd/containerd/api/services/diff/v1"
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	imagesapi "github.com/containerd/containerd/api/services/images/v1"
+	introspectionapi "github.com/containerd/containerd/api/services/introspection/v1"
+	leasesapi "github.com/containerd/containerd/api/services/leases/v1"
+	namespacesapi "github.com/containerd/containerd/api/services/namespaces/v1"
+	sandboxsapi "github.com/containerd/containerd/api/services/sandbox/v1"
+	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
+	"github.com/containerd/containerd/api/services/tasks/v1"
+	versionservice "github.com/containerd/containerd/api/services/version/v1"
+	apitypes "github.com/containerd/containerd/api/types"
+	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/content"
+	contentproxy "github.com/containerd/containerd/content/proxy"
+	"github.com/containerd/containerd/defaults"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/leases"
+	leasesproxy "github.com/containerd/containerd/leases/proxy"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/pkg/dialer"
+	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/plugin"
+	ptypes "github.com/containerd/containerd/protobuf/types"
+	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/sandbox"
+	sandboxproxy "github.com/containerd/containerd/sandbox/proxy"
+	"github.com/containerd/containerd/services/introspection"
+	"github.com/containerd/containerd/snapshots"
+	snproxy "github.com/containerd/containerd/snapshots/proxy"
 	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -83,7 +84,7 @@ func init() {
 
 // New returns a new containerd client that is connected to the containerd
 // instance provided by address
-func New(address string, opts ...Opt) (*Client, error) {
+func New(address string, opts ...ClientOpt) (*Client, error) {
 	var copts clientOpts
 	for _, o := range opts {
 		if err := o(&copts); err != nil {
@@ -175,7 +176,7 @@ func New(address string, opts ...Opt) (*Client, error) {
 
 // NewWithConn returns a new containerd client that is connected to the containerd
 // instance provided by the connection
-func NewWithConn(conn *grpc.ClientConn, opts ...Opt) (*Client, error) {
+func NewWithConn(conn *grpc.ClientConn, opts ...ClientOpt) (*Client, error) {
 	var copts clientOpts
 	for _, o := range opts {
 		if err := o(&copts); err != nil {
@@ -185,7 +186,7 @@ func NewWithConn(conn *grpc.ClientConn, opts ...Opt) (*Client, error) {
 	c := &Client{
 		defaultns: copts.defaultns,
 		conn:      conn,
-		runtime:   defaults.DefaultRuntime,
+		runtime:   plugin.RuntimePlugin.String() + "." + runtime.GOOS,
 	}
 
 	if copts.defaultPlatform != nil {
@@ -278,15 +279,11 @@ func (c *Client) Containers(ctx context.Context, filters ...string) ([]Container
 // NewContainer will create a new container with the provided id.
 // The id must be unique within the namespace.
 func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContainerOpts) (Container, error) {
-	newCtx, cancel := context.WithTimeout(ctx, 500*time.Second)
-	if cancel != nil {
-		defer cancel()
-	}
-	newCtx, done, err := c.WithLease(newCtx)
+	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer done(newCtx)
+	defer done(ctx)
 
 	container := containers.Container{
 		ID: id,
@@ -295,15 +292,13 @@ func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContain
 		},
 	}
 	for _, o := range opts {
-		if err := o(newCtx, c, &container); err != nil {
+		if err := o(ctx, c, &container); err != nil {
 			return nil, err
 		}
 	}
-	log.G(newCtx).Infof("func (c *Client) NewContainer before c.ContainerService().Create ")
-	r, err := c.ContainerService().Create(newCtx, container)
-	log.G(newCtx).Infof("func (c *Client) NewContainer after c.ContainerService().Create ,err = %v", err)
+	r, err := c.ContainerService().Create(ctx, container)
 	if err != nil {
-		log.G(newCtx).Infof("func (c *Client) NewContainer err = %v", err)
+		log.G(ctx).Infof("func (c *Client) NewContainer err = %v", err)
 		return nil, err
 	}
 	return containerFromRecord(c, r), nil
@@ -727,10 +722,9 @@ func (c *Client) SandboxStore() sandbox.Store {
 }
 
 // SandboxController returns the underlying sandbox controller client
-func (c *Client) SandboxController(name string) sandbox.Controller {
-	// default sandboxer is shim
-	if c.sandboxers != nil {
-		return c.sandboxers[name]
+func (c *Client) SandboxController() sandbox.Controller {
+	if c.sandboxController != nil {
+		return c.sandboxController
 	}
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
@@ -834,7 +828,7 @@ func (c *Client) getSnapshotter(ctx context.Context, name string) (snapshots.Sna
 // GetSnapshotterSupportedPlatforms returns a platform matchers which represents the
 // supported platforms for the given snapshotters
 func (c *Client) GetSnapshotterSupportedPlatforms(ctx context.Context, snapshotterName string) (platforms.MatchComparer, error) {
-	filters := []string{fmt.Sprintf("type==%s, id==%s", plugins.SnapshotPlugin, snapshotterName)}
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
 	in := c.IntrospectionService()
 
 	resp, err := in.Plugins(ctx, filters)
@@ -865,7 +859,7 @@ func toPlatforms(pt []*apitypes.Platform) []ocispec.Platform {
 
 // GetSnapshotterCapabilities returns the capabilities of a snapshotter.
 func (c *Client) GetSnapshotterCapabilities(ctx context.Context, snapshotterName string) ([]string, error) {
-	filters := []string{fmt.Sprintf("type==%s, id==%s", plugins.SnapshotPlugin, snapshotterName)}
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
 	in := c.IntrospectionService()
 
 	resp, err := in.Plugins(ctx, filters)

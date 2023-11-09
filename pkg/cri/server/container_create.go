@@ -244,6 +244,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 
 	containerIO, err := cio.NewContainerIO(id,
 		cio.WithNewFIFOs(volatileContainerRootDir, config.GetTty(), config.GetStdin()))
+	log.G(ctx).Infof("func (c *Client) NewContainer after cio.NewContainerIO")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container io: %w", err)
 	}
@@ -256,13 +257,18 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}()
 
 	specOpts, err := c.platformSpecOpts(platform, config, &image.ImageSpec.Config)
+	log.G(ctx).Infof("func (c *Client) NewContainer after platformSpecOpts")
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get container spec opts: %w", err)
 	}
 
 	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, containerKindContainer)
+	log.G(ctx).Infof("func (c *Client) NewContainer after buildLabels")
 
 	sandboxInfo, err := c.client.SandboxStore().Get(ctx, sandboxID)
+	log.G(ctx).Infof("func (c *Client) NewContainer after SandboxStore")
+
 	if err != nil {
 		return nil, fmt.Errorf("unable to get sandbox %q metdata: %w", sandboxID, err)
 	}
@@ -284,6 +290,12 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			c.nri.UndoCreateContainer(deferCtx, &sandbox, id, spec)
 		}
 	}()
+
+	// newCtx, cancel := context.WithTimeout(ctx, 500*time.Second)
+	// if cancel != nil {
+	// 	defer cancel()
+	// }
+	log.G(ctx).Infof("func (c *Client) NewContainer before NewContainer")
 
 	var cntr containerd.Container
 	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {
