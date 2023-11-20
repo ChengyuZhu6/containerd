@@ -221,7 +221,8 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	if ccancel != nil {
 		defer ccancel()
 	}
-
+	log.G(cctx).Debugf("createContainerTimeout in CreateContainer =  %q",
+		createContainerTimeout)
 	// Set snapshotter before any other options.
 	opts := []containerd.NewContainerOpts{
 		containerd.WithSnapshotter(c.RuntimeSnapshotter(cctx, ociRuntime)),
@@ -295,7 +296,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			c.nri.UndoCreateContainer(deferCtx, &sandbox, id, spec)
 		}
 	}()
-
+	log.G(cctx).Debugf("!!!before c.client.NewContainer")
 	var cntr containerd.Container
 	if cntr, err = c.client.NewContainer(cctx, id, opts...); err != nil {
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
@@ -309,6 +310,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			}
 		}
 	}()
+	log.G(cctx).Debugf("!!!after c.client.NewContainer")
 
 	status := containerstore.Status{CreatedAt: time.Now().UnixNano()}
 	status = copyResourcesToStatus(spec, status)

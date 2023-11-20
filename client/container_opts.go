@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/containerd/containerd/v2/containers"
 	"github.com/containerd/containerd/v2/content"
@@ -30,6 +31,7 @@ import (
 	"github.com/containerd/containerd/v2/oci"
 	"github.com/containerd/containerd/v2/protobuf"
 	"github.com/containerd/containerd/v2/snapshots"
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	"github.com/opencontainers/image-spec/identity"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -237,29 +239,40 @@ func WithNewSnapshotView(id string, i Image, opts ...snapshots.Opt) NewContainer
 
 func withNewSnapshot(id string, i Image, readonly bool, opts ...snapshots.Opt) NewContainerOpts {
 	return func(ctx context.Context, client *Client, c *containers.Container) error {
-		diffIDs, err := i.RootFS(ctx)
+		// createContainerTimeout, err := time.ParseDuration(c.config.CreateContainerTimeout)
+		// if err != nil {
+		// 	return fmt.Errorf("failed to parse createcontainer_timeout %q: %w", c.config.CreateContainerTimeout, err)
+		// }
+		createContainerTimeout, err := time.ParseDuration("5m0s")
+		cctx, ccancel := context.WithTimeout(ctx, createContainerTimeout)
+		if ccancel != nil {
+			defer ccancel()
+		}
+		log.G(cctx).Debugf("createContainerTimeout in withNewSnapshot =  %q",
+			createContainerTimeout)
+		diffIDs, err := i.RootFS(cctx)
 		if err != nil {
 			return err
 		}
 
 		parent := identity.ChainID(diffIDs).String()
-		c.Snapshotter, err = client.resolveSnapshotterName(ctx, c.Snapshotter)
+		c.Snapshotter, err = client.resolveSnapshotterName(cctx, c.Snapshotter)
 		if err != nil {
 			return err
 		}
-		s, err := client.getSnapshotter(ctx, c.Snapshotter)
+		s, err := client.getSnapshotter(cctx, c.Snapshotter)
 		if err != nil {
 			return err
 		}
-		parent, err = resolveSnapshotOptions(ctx, client, c.Snapshotter, s, parent, opts...)
+		parent, err = resolveSnapshotOptions(cctx, client, c.Snapshotter, s, parent, opts...)
 		if err != nil {
 			return err
 		}
 
 		if readonly {
-			_, err = s.View(ctx, id, parent, opts...)
+			_, err = s.View(cctx, id, parent, opts...)
 		} else {
-			_, err = s.Prepare(ctx, id, parent, opts...)
+			_, err = s.Prepare(cctx, id, parent, opts...)
 		}
 		if err != nil {
 			return err

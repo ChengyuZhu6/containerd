@@ -19,6 +19,7 @@ package instrument
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/containerd/containerd/v2/errdefs"
 	"github.com/containerd/containerd/v2/tracing"
@@ -163,21 +164,30 @@ func (in *instrumentedService) PortForward(ctx context.Context, r *runtime.PortF
 }
 
 func (in *instrumentedService) CreateContainer(ctx context.Context, r *runtime.CreateContainerRequest) (res *runtime.CreateContainerResponse, err error) {
+	log.G(ctx).Debugf("!!!func (in *instrumentedService) CreateContainer")
+	createContainerTimeout, err := time.ParseDuration("5m0s")
+	cctx, ccancel := context.WithTimeout(ctx, createContainerTimeout)
+	if ccancel != nil {
+		defer ccancel()
+	}
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
-	log.G(ctx).Infof("CreateContainer within sandbox %q for container %+v",
+	log.G(cctx).Infof("CreateContainer within sandbox %q for container %+v",
 		r.GetPodSandboxId(), r.GetConfig().GetMetadata())
 	defer func() {
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("CreateContainer within sandbox %q for %+v failed",
+			log.G(cctx).WithError(err).Errorf("CreateContainer within sandbox %q for %+v failed",
 				r.GetPodSandboxId(), r.GetConfig().GetMetadata())
 		} else {
-			log.G(ctx).Infof("CreateContainer within sandbox %q for %+v returns container id %q",
+			log.G(cctx).Infof("CreateContainer within sandbox %q for %+v returns container id %q",
 				r.GetPodSandboxId(), r.GetConfig().GetMetadata(), res.GetContainerId())
 		}
 	}()
-	res, err = in.c.CreateContainer(ctrdutil.WithNamespace(ctx), r)
+
+	log.G(cctx).Debugf("createContainerTimeout in instrumentedService CreateContainer =  %q",
+		createContainerTimeout)
+	res, err = in.c.CreateContainer(ctrdutil.WithNamespace(cctx), r)
 	return res, errdefs.ToGRPC(err)
 }
 

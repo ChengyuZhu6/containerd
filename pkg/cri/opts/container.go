@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/containerd/continuity/fs"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -39,15 +40,22 @@ import (
 func WithNewSnapshot(id string, i containerd.Image, opts ...snapshots.Opt) containerd.NewContainerOpts {
 	f := containerd.WithNewSnapshot(id, i, opts...)
 	return func(ctx context.Context, client *containerd.Client, c *containers.Container) error {
-		if err := f(ctx, client, c); err != nil {
+		createContainerTimeout, _ := time.ParseDuration("5m0s")
+		cctx, ccancel := context.WithTimeout(ctx, createContainerTimeout)
+		if ccancel != nil {
+			defer ccancel()
+		}
+		log.G(cctx).Debugf("createContainerTimeout in withNewSnapshot WithNewSnapshot =  %q",
+			createContainerTimeout)
+		if err := f(cctx, client, c); err != nil {
 			if !errdefs.IsNotFound(err) {
 				return err
 			}
 
-			if err := i.Unpack(ctx, c.Snapshotter); err != nil {
+			if err := i.Unpack(cctx, c.Snapshotter); err != nil {
 				return fmt.Errorf("error unpacking image: %w", err)
 			}
-			return f(ctx, client, c)
+			return f(cctx, client, c)
 		}
 		return nil
 	}

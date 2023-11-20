@@ -60,6 +60,7 @@ import (
 	"github.com/containerd/containerd/v2/services/introspection"
 	"github.com/containerd/containerd/v2/snapshots"
 	snproxy "github.com/containerd/containerd/v2/snapshots/proxy"
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -277,11 +278,18 @@ func (c *Client) Containers(ctx context.Context, filters ...string) ([]Container
 // NewContainer will create a new container with the provided id.
 // The id must be unique within the namespace.
 func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContainerOpts) (Container, error) {
-	ctx, done, err := c.WithLease(ctx)
+	createContainerTimeout, _ := time.ParseDuration("5m0s")
+	cctx, ccancel := context.WithTimeout(ctx, createContainerTimeout)
+	if ccancel != nil {
+		defer ccancel()
+	}
+	log.G(cctx).Debugf("createContainerTimeout in NewContainer =  %q",
+		createContainerTimeout)
+	cctx, done, err := c.WithLease(cctx)
 	if err != nil {
 		return nil, err
 	}
-	defer done(ctx)
+	defer done(cctx)
 
 	container := containers.Container{
 		ID: id,
@@ -290,11 +298,11 @@ func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContain
 		},
 	}
 	for _, o := range opts {
-		if err := o(ctx, c, &container); err != nil {
+		if err := o(cctx, c, &container); err != nil {
 			return nil, err
 		}
 	}
-	r, err := c.ContainerService().Create(ctx, container)
+	r, err := c.ContainerService().Create(cctx, container)
 	if err != nil {
 		return nil, err
 	}
