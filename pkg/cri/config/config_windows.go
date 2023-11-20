@@ -85,6 +85,7 @@ func DefaultConfig() PluginConfig {
 			KeyModel: KeyModelNode,
 		},
 		ImagePullProgressTimeout: time.Minute.String(),
+		CreateContainerTimeout:   time.Minute.String(),
 		DrainExecSyncIOTimeout:   "0s",
 	}
 }

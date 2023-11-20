@@ -213,9 +213,18 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, err
 	}
 
+	createContainerTimeout, err := time.ParseDuration(c.config.CreateContainerTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse createcontainer_timeout %q: %w", c.config.CreateContainerTimeout, err)
+	}
+	cctx, ccancel := context.WithTimeout(ctx, createContainerTimeout)
+	if ccancel != nil {
+		defer ccancel()
+	}
+
 	// Set snapshotter before any other options.
 	opts := []containerd.NewContainerOpts{
-		containerd.WithSnapshotter(c.RuntimeSnapshotter(ctx, ociRuntime)),
+		containerd.WithSnapshotter(c.RuntimeSnapshotter(cctx, ociRuntime)),
 		// Prepare container rootfs. This is always writeable even if
 		// the container wants a readonly rootfs since we want to give
 		// the runtime (runc) a chance to modify (e.g. to create mount
@@ -236,10 +245,10 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	// Validate log paths and compose full container log path.
 	if sandboxConfig.GetLogDirectory() != "" && config.GetLogPath() != "" {
 		meta.LogPath = filepath.Join(sandboxConfig.GetLogDirectory(), config.GetLogPath())
-		log.G(ctx).Debugf("Composed container full log path %q using sandbox log dir %q and container log path %q",
+		log.G(cctx).Debugf("Composed container full log path %q using sandbox log dir %q and container log path %q",
 			meta.LogPath, sandboxConfig.GetLogDirectory(), config.GetLogPath())
 	} else {
-		log.G(ctx).Infof("Logging will be disabled due to empty log paths for sandbox (%q) or container (%q)",
+		log.G(cctx).Infof("Logging will be disabled due to empty log paths for sandbox (%q) or container (%q)",
 			sandboxConfig.GetLogDirectory(), config.GetLogPath())
 	}
 
@@ -251,7 +260,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	defer func() {
 		if retErr != nil {
 			if err := containerIO.Close(); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to close container io %q", id)
+				log.G(cctx).WithError(err).Errorf("Failed to close container io %q", id)
 			}
 		}
 	}()
@@ -263,7 +272,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 
 	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, crilabels.ContainerKindContainer)
 
-	sandboxInfo, err := c.client.SandboxStore().Get(ctx, sandboxID)
+	sandboxInfo, err := c.client.SandboxStore().Get(cctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get sandbox %q metdata: %w", sandboxID, err)
 	}
@@ -278,6 +287,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	opts = append(opts, containerd.WithSandbox(sandboxID))
 
 	opts = append(opts, c.nri.WithContainerAdjustment())
+
 	defer func() {
 		if retErr != nil {
 			deferCtx, deferCancel := util.DeferContext()
@@ -287,7 +297,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}()
 
 	var cntr containerd.Container
-	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {
+	if cntr, err = c.client.NewContainer(cctx, id, opts...); err != nil {
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
 	}
 	defer func() {
@@ -295,7 +305,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			deferCtx, deferCancel := util.DeferContext()
 			defer deferCancel()
 			if err := cntr.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
+				log.G(cctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
 			}
 		}
 	}()
@@ -314,7 +324,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		if retErr != nil {
 			// Cleanup container checkpoint on error.
 			if err := container.Delete(); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to cleanup container checkpoint for %q", id)
+				log.G(cctx).WithError(err).Errorf("Failed to cleanup container checkpoint for %q", id)
 			}
 		}
 	}()
@@ -324,11 +334,11 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, fmt.Errorf("failed to add container %q into store: %w", id, err)
 	}
 
-	c.generateAndSendContainerEvent(ctx, id, sandboxID, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
+	c.generateAndSendContainerEvent(cctx, id, sandboxID, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
 
-	err = c.nri.PostCreateContainer(ctx, &sandbox, &container)
+	err = c.nri.PostCreateContainer(cctx, &sandbox, &container)
 	if err != nil {
-		log.G(ctx).WithError(err).Errorf("NRI post-create notification failed")
+		log.G(cctx).WithError(err).Errorf("NRI post-create notification failed")
 	}
 
 	containerCreateTimer.WithValues(ociRuntime.Type).UpdateSince(start)

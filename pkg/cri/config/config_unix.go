@@ -101,6 +101,7 @@ func DefaultConfig() PluginConfig {
 		EnableCDI:                false,
 		CDISpecDirs:              []string{"/etc/cdi", "/var/run/cdi"},
 		ImagePullProgressTimeout: time.Minute.String(),
+		CreateContainerTimeout:   time.Minute.String(),
 		DrainExecSyncIOTimeout:   "0s",
 		EnableUnprivilegedPorts:  true,
 		EnableUnprivilegedICMP:   true,
