@@ -176,7 +176,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	)
 
 	labels := c.getLabels(ctx, ref)
-
+	log.G(ctx).Debugf("zcy PullImage label = %v", labels)
 	pullOpts := []containerd.RemoteOpt{
 		containerd.WithSchema1Conversion, //nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
 		containerd.WithResolver(resolver),
@@ -786,6 +786,10 @@ func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, i
 	if !ok {
 		return snapshotter, nil
 	}
+
+	log.G(ctx).Infof("experimental: annotations.RuntimeHandler = %v, runtimeHandler = %v", annotations.RuntimeHandler, runtimeHandler)
+	log.G(ctx).Infof("experimental: runtimePlatforms = %v, c.runtimePlatforms[runtimeHandler] = %v", c.runtimePlatforms, c.runtimePlatforms[runtimeHandler])
+	log.G(ctx).Infof("experimental: snapshotter = %v", snapshotter)
 
 	// TODO: Ensure error is returned if runtime not found?
 	if c.runtimePlatforms != nil {

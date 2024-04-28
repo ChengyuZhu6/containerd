@@ -266,7 +266,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}
 
 	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, crilabels.ContainerKindContainer)
-
+	log.G(ctx).Debugf("zcy containercreate containerLabels = %v", containerLabels)
 	// TODO the sandbox in the cache should hold this info
 	runtimeName, runtimeOption, err := c.runtimeInfo(ctx, sandboxID)
 	if err != nil {
