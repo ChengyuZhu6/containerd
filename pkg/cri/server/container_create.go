@@ -198,6 +198,9 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		// rootfs readonly (requested by spec.Root.Readonly).
 		customopts.WithNewSnapshot(id, containerdImage, sOpts...),
 	}
+
+	log.G(ctx).Debugf("cyzhu containercreate snapshotter options= %v", opts)
+
 	if len(volumeMounts) > 0 {
 		mountMap := make(map[string]string)
 		for _, v := range volumeMounts {
@@ -257,6 +260,11 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			c.nri.UndoCreateContainer(deferCtx, &sandbox, id, spec)
 		}
 	}()
+
+	log.G(ctx).Debugf("cyzhu containercreate containerLabels = %v", containerLabels)
+	log.G(ctx).Debugf("cyzhu containercreate specOpts = %v", specOpts)
+	log.G(ctx).Debugf("cyzhu containercreate runtimeOptions = %v", runtimeOptions)
+	log.G(ctx).Debugf("cyzhu containercreate containerLabels = %v", containerLabels)
 
 	var cntr containerd.Container
 	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {

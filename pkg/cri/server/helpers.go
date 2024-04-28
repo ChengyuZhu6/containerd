@@ -229,7 +229,9 @@ func (c *criService) ensureImageExists(ctx context.Context, ref string, config *
 	if err != nil && !errdefs.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get image %q: %w", ref, err)
 	}
+
 	if err == nil {
+		logrus.Infof("The image %v exists", ref)
 		return &image, nil
 	}
 	// Pull image to ensure the image exists

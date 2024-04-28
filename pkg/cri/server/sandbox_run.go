@@ -164,6 +164,10 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, err
 	}
 	sOpts = append(sOpts, extraSOpts...)
+	log.G(ctx).Debugf("cyzhu RunPodSandbox snapshots opt = %v", snapshots.WithLabels(snapshots.FilterInheritedLabels(config.Annotations)))
+	log.G(ctx).Debugf("cyzhu RunPodSandbox sandboxLabels = %v", sandboxLabels)
+	log.G(ctx).Debugf("cyzhu RunPodSandbox runtimeOpts = %v", runtimeOpts)
+	log.G(ctx).Debugf("cyzhu RunPodSandbox specOpts = %v", specOpts)
 
 	opts := []containerd.NewContainerOpts{
 		containerd.WithSnapshotter(c.runtimeSnapshotter(ctx, ociRuntime)),

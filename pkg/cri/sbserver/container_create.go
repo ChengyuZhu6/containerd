@@ -257,7 +257,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}
 
 	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, containerKindContainer)
-
+	log.G(ctx).Debugf("cyzhu containercreate containerLabels = %v", containerLabels)
 	sandboxInfo, err := c.client.SandboxStore().Get(ctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get sandbox %q metdata: %w", sandboxID, err)

@@ -366,6 +366,9 @@ func (s *snapshotter) createSnapshot(ctx context.Context, key, parent string, re
 		created string
 		rerr    error
 	)
+
+	log.G(ctx).Debugf("cyzhu createSnapshot target = %v, bopts = %v", target, base.Labels)
+
 	if readonly {
 		m, err = s.Snapshotter.View(ctx, bkey, bparent, bopts...)
 	} else {

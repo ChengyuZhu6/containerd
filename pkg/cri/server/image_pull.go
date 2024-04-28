@@ -167,6 +167,8 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 		}),
 	}
 
+	log.G(ctx).Debugf("zcy PullImage imageLabelKey = %v, imageLabelValue = %v", imageLabelKey, imageLabelValue)
+
 	pullOpts = append(pullOpts, c.encryptedImagesPullOpts()...)
 	if !c.config.ContainerdConfig.DisableSnapshotAnnotations {
 		pullOpts = append(pullOpts,
@@ -757,6 +759,9 @@ func (c *criService) snapshotterFromPodSandboxConfig(ctx context.Context, imageR
 	}
 
 	snapshotter = c.runtimeSnapshotter(context.Background(), ociRuntime)
+	log.G(ctx).Infof("experimental: annotations.RuntimeHandler = %v, runtimeHandler = %v", annotations.RuntimeHandler, runtimeHandler)
+	log.G(ctx).Infof("experimental: snapshotter = %v", snapshotter)
+
 	log.G(ctx).Infof("experimental: PullImage %q for runtime %s, using snapshotter %s", imageRef, runtimeHandler, snapshotter)
 	return snapshotter, nil
 }

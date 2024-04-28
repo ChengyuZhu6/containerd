@@ -296,6 +296,7 @@ func (u *Unpacker) unpack(
 		defer unlock()
 
 		if _, err := sn.Stat(ctx, chainID); err == nil {
+			log.G(ctx).Debugf("cyzhu unpack chainID exists")
 			// no need to handle
 			return nil
 		} else if !errdefs.IsNotFound(err) {
@@ -308,6 +309,7 @@ func (u *Unpacker) unpack(
 			snapshotLabels = make(map[string]string)
 		}
 		snapshotLabels[labelSnapshotRef] = chainID
+		log.G(ctx).Debugf("cyzhu unpack snapshotLabels[labelSnapshotRef] = %v", snapshotLabels[labelSnapshotRef])
 
 		var (
 			key    string
