@@ -45,6 +45,7 @@ import (
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 	"github.com/containerd/containerd/pkg/cri/util"
 	"github.com/containerd/containerd/pkg/netns"
+	"github.com/containerd/containerd/pkg/snapshotters"
 	"github.com/containerd/containerd/snapshots"
 )
 
@@ -160,6 +161,8 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 
 	sOpts := []snapshots.Opt{snapshots.WithLabels(snapshots.FilterInheritedLabels(config.Annotations))}
 	extraSOpts, err := sandboxSnapshotterOpts(config)
+	sandboxImageNameSOpts := []snapshots.Opt{snapshots.WithLabels(map[string]string{snapshotters.TargetRefLabel: c.config.SandboxImage})}
+	extraSOpts = append(extraSOpts, sandboxImageNameSOpts...)
 	if err != nil {
 		return nil, err
 	}
