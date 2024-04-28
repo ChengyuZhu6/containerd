@@ -79,10 +79,11 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 		labels = map[string]string{}
 	)
 
+	sandboxImage := c.getSandboxImageName()
 	// Ensure sandbox container image snapshot.
-	image, err := c.cri.EnsureImageExists(ctx, c.config.SandboxImage, config)
+	image, err := c.cri.EnsureImageExists(ctx, sandboxImage, config)
 	if err != nil {
-		return cin, fmt.Errorf("failed to get sandbox image %q: %w", c.config.SandboxImage, err)
+		return cin, fmt.Errorf("failed to get sandbox image %q: %w", sandboxImage, err)
 	}
 
 	containerdImage, err := c.toContainerdImage(ctx, *image)
@@ -324,4 +325,14 @@ func (c *Controller) getSandboxRuntime(config *runtime.PodSandboxConfig, runtime
 		return criconfig.Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
 	}
 	return handler, nil
+}
+
+func (c *Controller) getSandboxImageName() string {
+	// returns the name of the sandbox image used to scope pod shared resources used by the pod's containers,
+	// if empty return the default sandbox image.
+	sandboxImage := c.config.SandboxImage
+	if sandboxImage != "" {
+		return sandboxImage
+	}
+	return criconfig.DefaultConfig().SandboxImage
 }

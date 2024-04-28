@@ -38,6 +38,9 @@ const (
 	// SandboxID is the sandbox ID annotation
 	SandboxID = "io.kubernetes.cri.sandbox-id"
 
+	// SandboxImageName is the name of the sandbox image
+	SandboxImageName = "io.kubernetes.cri.podsandbox.image-name"
+
 	// SandboxCPU annotations are based on the initial CPU configuration for the sandbox. This is calculated as the
 	// sum of container CPU resources, optionally provided by Kubelet (introduced  in 1.23) as part of the PodSandboxConfig
 	SandboxCPUPeriod = "io.kubernetes.cri.sandbox-cpu-period"
@@ -110,11 +113,14 @@ func DefaultCRIAnnotations(
 	ctrType := ContainerTypeContainer
 	if sandbox {
 		ctrType = ContainerTypeSandbox
-		// Sandbox log dir only gets passed for sandboxes, the other metadata always
+		// Sandbox log dir and sandbox image name get passed for sandboxes, the other metadata always
 		// gets sent however.
-		opts = append(opts, customopts.WithAnnotation(SandboxLogDir, config.GetLogDirectory()))
+		opts = append(opts,
+			customopts.WithAnnotation(SandboxLogDir, config.GetLogDirectory()),
+			customopts.WithAnnotation(SandboxImageName, imageName),
+		)
 	} else {
-		// Image name and container name only get passed for containers.s
+		// Image name and container name get passed for containers.s
 		opts = append(
 			opts,
 			customopts.WithAnnotation(ContainerName, containerName),
