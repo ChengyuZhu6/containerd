@@ -81,7 +81,7 @@ func NewService(config criconfig.Config, imageFSPaths map[string]string, client 
 	} else {
 		return nil, fmt.Errorf("failed to find snapshotter %q", snapshotterName)
 	}
-
+	log.L.Info("zzzzcy snapshotters : %v", snapshotters)
 	// Start snapshot stats syncer, it doesn't need to be stopped.
 	log.L.Info("Start snapshots syncer")
 	snapshotsSyncer := newSnapshotsSyncer(
@@ -130,6 +130,7 @@ func (c *CRIImageService) RuntimeSnapshotter(ctx context.Context, ociRuntime cri
 	if ociRuntime.Snapshotter == "" {
 		return c.config.ContainerdConfig.Snapshotter
 	}
+	log.G(ctx).Debugf("zzzzcy snapshotter for runtime %s to %s", ociRuntime.Type, ociRuntime.Snapshotter)
 
 	log.G(ctx).Debugf("Set snapshotter for runtime %s to %s", ociRuntime.Type, ociRuntime.Snapshotter)
 	return ociRuntime.Snapshotter
@@ -146,5 +147,7 @@ func (c *CRIImageService) GetSnapshot(key, snapshotter string) (snapshotstore.Sn
 		Key:         key,
 		Snapshotter: snapshotter,
 	}
+	log.L.Info("zzzzcy snapshotKey : %v", snapshotKey)
+
 	return c.snapshotStore.Get(snapshotKey)
 }
