@@ -43,6 +43,9 @@ type SnapshotterConfig struct {
 
 	scratchGenerator func(string) error
 
+	// Support per-layer mount
+	layerMount bool
+
 	// fsType is the filesystem type for the mount (defaults to ext4)
 	fsType string
 
@@ -75,6 +78,13 @@ func WithScratchFile(src string) Opt {
 			}
 			return nil
 		}
+	}
+}
+
+// WithCopySparse is used to determine that mount the image by layer or not.
+func WithLayerMount(layerMount bool) Opt {
+	return func(root string, config *SnapshotterConfig) {
+		config.layerMount = layerMount
 	}
 }
 
@@ -112,11 +122,12 @@ func withViewHookHelper(fn viewHookHelper) Opt {
 }
 
 type snapshotter struct {
-	root    string
-	scratch string
-	fsType  string
-	options []string
-	ms      *storage.MetaStore
+	root       string
+	scratch    string
+	layerMount bool
+	fsType     string
+	options    []string
+	ms         *storage.MetaStore
 
 	testViewHookHelper viewHookHelper
 }
@@ -152,6 +163,8 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		}
 	}
 
+	layerMount := config.layerMount
+
 	if config.fsType == "" {
 		config.fsType = "ext4"
 	}
@@ -170,11 +183,12 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	return &snapshotter{
-		root:    root,
-		scratch: scratch,
-		fsType:  config.fsType,
-		options: config.mountOptions,
-		ms:      ms,
+		root:       root,
+		scratch:    scratch,
+		layerMount: layerMount,
+		fsType:     config.fsType,
+		options:    config.mountOptions,
+		ms:         ms,
 
 		testViewHookHelper: config.testViewHookHelper,
 	}, nil

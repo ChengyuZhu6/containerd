@@ -34,6 +34,9 @@ type Config struct {
 	// ScratchFile is the scratch block file to use as an empty block
 	ScratchFile string `toml:"scratch_file"`
 
+	// LayerMount
+	layerMount bool `toml:"layer_mount"`
+
 	// FSType is the filesystem type for the mount
 	FSType string `toml:"fs_type"`
 
@@ -66,6 +69,7 @@ func init() {
 			if config.ScratchFile != "" {
 				opts = append(opts, blockfile.WithScratchFile(config.ScratchFile))
 			}
+			opts = append(opts, blockfile.WithLayerMount(config.layerMount))
 			if config.FSType != "" {
 				opts = append(opts, blockfile.WithFSType(config.FSType))
 			}
