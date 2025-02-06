@@ -33,6 +33,12 @@ type Config struct {
 
 	// MountOptions are options used for the EROFS overlayfs mount
 	OvlOptions []string `toml:"ovl_mount_options"`
+
+	// EnableVerity enables dm-verity for committed snapshots
+	EnableVerity bool `toml:"enable_verity"`
+
+	// VerityHashAlgorithm specifies the hash algorithm for dm-verity
+	VerityHashAlgorithm string `toml:"verity_hash_algorithm"`
 }
 
 func init() {
@@ -56,6 +62,13 @@ func init() {
 
 			if len(config.OvlOptions) > 0 {
 				opts = append(opts, erofs.WithOvlOptions(config.OvlOptions))
+			}
+
+			if config.EnableVerity {
+				opts = append(opts, erofs.WithVerity())
+				if config.VerityHashAlgorithm != "" {
+					opts = append(opts, erofs.WithVerityHashAlgorithm(config.VerityHashAlgorithm))
+				}
 			}
 
 			ic.Meta.Exports[plugins.SnapshotterRootDir] = root

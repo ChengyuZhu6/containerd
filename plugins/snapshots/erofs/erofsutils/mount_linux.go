@@ -30,6 +30,14 @@ import (
 	"github.com/containerd/log"
 )
 
+// VerityConfig contains dm-verity configuration
+type VerityConfig struct {
+	Enabled      bool
+	HashAlgo     string
+	RootHash     string
+	VerityBlocks int64
+}
+
 func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExtraOpts []string) error {
 	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
 	args = append(args, layerPath)
@@ -52,6 +60,58 @@ func ConvertErofs(ctx context.Context, layerPath string, srcDir string, mkfsExtr
 		return fmt.Errorf("erofs apply failed: %s: %w", out, err)
 	}
 	log.G(ctx).Infof("running %s %s %v", cmd.Path, cmd.Args, string(out))
+	return nil
+}
+
+// ConvertErofsWithVerity converts a directory to EROFS format with dm-verity
+func ConvertErofsWithVerity(ctx context.Context, layerPath string, srcDir string, verity VerityConfig, mkfsExtraOpts []string) error {
+	if !verity.Enabled {
+		return ConvertErofs(ctx, layerPath, srcDir, mkfsExtraOpts)
+	}
+
+	// Create temporary file for verity metadata
+	verityFile := layerPath + ".verity"
+	defer os.Remove(verityFile)
+
+	// First create the EROFS image
+	if err := ConvertErofs(ctx, layerPath, srcDir, mkfsExtraOpts); err != nil {
+		return err
+	}
+
+	// Generate dm-verity metadata
+	hashAlgo := verity.HashAlgo
+	if hashAlgo == "" {
+		hashAlgo = "sha256"
+	}
+
+	args := []string{
+		"format",
+		"--hash-algorithm=" + hashAlgo,
+		"--data-blocks=" + fmt.Sprint(verity.VerityBlocks),
+		layerPath,
+		verityFile,
+	}
+
+	cmd := exec.CommandContext(ctx, "veritysetup", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("veritysetup failed: %s: %w", out, err)
+	}
+
+	// Read root hash
+	rootHash, err := exec.CommandContext(ctx, "veritysetup", "format", "--show-root-hash", layerPath).Output()
+	if err != nil {
+		return fmt.Errorf("failed to get root hash: %w", err)
+	}
+
+	// Store verity metadata alongside the EROFS image
+	if err := os.WriteFile(layerPath+".verity.meta", []byte(fmt.Sprintf(`{
+		"hash_algorithm": "%s",
+		"root_hash": "%s"
+	}`, hashAlgo, strings.TrimSpace(string(rootHash)))), 0644); err != nil {
+		return err
+	}
+
 	return nil
 }
 
