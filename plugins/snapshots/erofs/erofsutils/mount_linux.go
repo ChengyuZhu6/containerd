@@ -18,6 +18,7 @@ package erofsutils
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -26,9 +27,29 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 )
+
+// VerityMode specifies how to store dm-verity data
+type VerityMode int
+
+const (
+	// VerityModeSeparate stores data and hash tree in separate files
+	VerityModeSeparate VerityMode = iota
+	// VerityModeCombined combines data and hash tree in a single file
+	VerityModeCombined
+)
+
+// VerityConfig contains dm-verity configuration
+type VerityConfig struct {
+	Enabled      bool
+	HashAlgo     string
+	RootHash     string
+	VerityBlocks int64
+	Mode         VerityMode
+}
 
 func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExtraOpts []string) error {
 	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
@@ -52,6 +73,65 @@ func ConvertErofs(ctx context.Context, layerPath string, srcDir string, mkfsExtr
 		return fmt.Errorf("erofs apply failed: %s: %w", out, err)
 	}
 	log.G(ctx).Infof("running %s %s %v", cmd.Path, cmd.Args, string(out))
+	return nil
+}
+
+// ConvertErofsWithVerity converts a directory to EROFS format with dm-verity
+func ConvertErofsWithVerity(ctx context.Context, layerPath string, srcDir string, verity VerityConfig, mkfsExtraOpts []string) error {
+	if !verity.Enabled {
+		return ConvertErofs(ctx, layerPath, srcDir, mkfsExtraOpts)
+	}
+
+	// Create EROFS image first
+	if err := ConvertErofs(ctx, layerPath, srcDir, mkfsExtraOpts); err != nil {
+		return err
+	}
+
+	// Get file size for verity setup
+	fi, err := os.Stat(layerPath)
+	if err != nil {
+		return err
+	}
+	dataSize := fi.Size()
+	dataBlocks := (dataSize + dmverity.DefaultBlockSize - 1) / dmverity.DefaultBlockSize
+
+	// Configure dm-verity
+	config := dmverity.VerityConfig{
+		Version:       1,
+		HashAlgorithm: dmverity.HashAlgoSHA256,
+		DataBlockSize: dmverity.DefaultBlockSize,
+		HashBlockSize: dmverity.DefaultBlockSize,
+		DataBlocks:    uint64(dataBlocks),
+		Salt:          make([]byte, dmverity.DefaultSaltSize),
+	}
+
+	// Generate random salt
+	if _, err := rand.Read(config.Salt); err != nil {
+		return fmt.Errorf("failed to generate salt: %w", err)
+	}
+
+	hashDevice := ""
+	if verity.Mode != VerityModeCombined {
+		hashDevice = layerPath + ".verity"
+	} else {
+		// Get data device size for hash offset
+		fi, err := os.Stat(layerPath)
+		if err != nil {
+			return err
+		}
+		offset := fi.Size()
+		config.HashOffset = offset
+		hashDevice = layerPath // Use same device for combined mode
+	}
+
+	// Enable dm-verity and get root hash
+	rootHash, err := dmverity.Enable(layerPath, hashDevice, config)
+	if err != nil {
+		return fmt.Errorf("failed to enable dm-verity: %w", err)
+	}
+
+	// Store root hash in verity config
+	verity.RootHash = rootHash
 	return nil
 }
 
