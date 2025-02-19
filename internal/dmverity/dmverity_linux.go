@@ -17,132 +17,65 @@
 package dmverity
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
+
+	"github.com/containerd/containerd/v2/plugins/snapshots/devmapper/dmsetup"
 )
 
-const (
-	// Hash algorithms
-	HashAlgoSHA256 = 1
-	HashAlgoSHA512 = 2
-
-	// Default values
-	DefaultBlockSize = 4096
-	DefaultHashSize  = 32 // SHA256
-	DefaultSaltSize  = 32
-)
-
-// VerityConfig contains the configuration for dm-verity
-type VerityConfig struct {
-	// Version of the dm-verity format (1 or 2)
-	Version uint32
-	// Hash algorithm (1 = sha256, 2 = sha512)
-	HashAlgorithm uint32
-	// Data block size (must be power of 2)
-	DataBlockSize uint32
-	// Hash block size (must be power of 2)
-	HashBlockSize uint32
-	// Size of the data device in blocks
-	DataBlocks uint64
-	// Salt (optional)
-	Salt []byte
-	// Hash of the root hash block
-	RootDigest []byte
-	// Offset of hash tree in data device (0 means separate hash device)
-	HashOffset int64
-}
-
-// Enable enables dm-verity on a device using veritysetup
-func Enable(dataDevice string, hashDevice string, config VerityConfig) (string, error) {
-	if err := validateConfig(config); err != nil {
-		return "", err
-	}
-
-	// Format veritysetup arguments
-	args := []string{
-		"format",
-		"--hash", hashAlgoToString(config.HashAlgorithm),
-		"--data-block-size", fmt.Sprintf("%d", config.DataBlockSize),
-		"--hash-block-size", fmt.Sprintf("%d", config.HashBlockSize),
-	}
-
-	if len(config.Salt) > 0 {
-		args = append(args, "--salt", fmt.Sprintf("%x", config.Salt))
-	}
-
-	if config.HashOffset > 0 {
-		args = append(args, "--hash-offset", fmt.Sprintf("%d", config.HashOffset))
-	}
-	args = append(args, dataDevice, hashDevice)
-
-	// Run veritysetup format
-	cmd := exec.Command("veritysetup", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("veritysetup format failed: %v, stderr: %s", err, stderr.String())
-	}
-
-	// Parse output to get root hash
-	output := stdout.String()
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "Root hash:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Root hash:")), nil
-		}
-	}
-
-	return "", fmt.Errorf("root hash not found in veritysetup output")
-}
-
-// CreateVerityTarget creates a dm-verity target device using veritysetup
-func CreateVerityTarget(name, dataDevice, hashDevice string, config VerityConfig) error {
+// Enable creates a dm-verity target device using dmsetup
+func Enable(name, dataDevice, hashDevice string, config VerityConfig) error {
 	if err := validateConfig(config); err != nil {
 		return err
 	}
 
-	// Format veritysetup arguments
-	args := []string{
-		"create",
-		name,
-		dataDevice,
-		hashDevice,
-		string(config.RootDigest),
-	}
+	// Format dmsetup table arguments for verity target
+	table := makeVerityTable(dataDevice, hashDevice, config)
 
-	if config.HashOffset > 0 {
-		args = append(args, "--hash-offset", fmt.Sprintf("%d", config.HashOffset))
-	}
-
-	// Run veritysetup create
-	cmd := exec.Command("veritysetup", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("veritysetup create failed: %v, stderr: %s", err, stderr.String())
-	}
-
-	return nil
+	// Create the device with the verity target
+	_, err := dmsetup.Dmsetup("create", name, "--readonly", "--table", table)
+	return err
 }
 
 // RemoveVerityDevice removes a dm-verity device
 func RemoveVerityDevice(name string) error {
-	cmd := exec.Command("veritysetup", "close", name)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("veritysetup close failed: %v, stderr: %s", err, stderr.String())
+	return dmsetup.RemoveDevice(name, dmsetup.RemoveWithRetries)
+}
+
+// makeVerityTable creates the dmsetup table string for verity target
+func makeVerityTable(dataDevice, hashDevice string, config VerityConfig) string {
+	// Calculate data device size in sectors
+	dataSize, err := dmsetup.BlockDeviceSize(dataDevice)
+	if err != nil {
+		return ""
 	}
-	return nil
+	lengthSectors := dataSize / dmsetup.SectorSize
+
+	// Format verity target parameters:
+	// start length verity version data_dev hash_dev data_block_size hash_block_size data_blocks hash_start hash_algorithm salt root_hash
+	dataBlocks := uint64(lengthSectors) * dmsetup.SectorSize / uint64(config.DataBlockSize)
+	hash_start := (config.HashOffset + int64(config.HashBlockSize) - 1) / int64(config.HashBlockSize)
+	target := fmt.Sprintf("0 %d verity %d %s %s %d %d %d %d %s %x %x",
+		lengthSectors,
+		config.Version,
+		dataDevice,
+		hashDevice,
+		config.DataBlockSize,
+		config.HashBlockSize,
+		dataBlocks,
+		hash_start,
+		hashAlgoToString(config.HashAlgorithm),
+		config.Salt,
+		config.RootDigest)
+
+	return target
 }
 
 // IsSupported checks if dm-verity is supported
 func IsSupported() (bool, error) {
-	// Check if veritysetup is available
-	if _, err := exec.LookPath("veritysetup"); err != nil {
+	// Check if dmsetup is available
+	if _, err := exec.LookPath("dmsetup"); err != nil {
 		return false, nil
 	}
 

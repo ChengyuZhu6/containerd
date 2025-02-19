@@ -124,14 +124,22 @@ func ConvertErofsWithVerity(ctx context.Context, layerPath string, srcDir string
 		hashDevice = layerPath // Use same device for combined mode
 	}
 
-	// Enable dm-verity and get root hash
-	rootHash, err := dmverity.Enable(layerPath, hashDevice, config)
+	// Generate hash tree and get root hash
+	hashTree, rootHash, err := dmverity.GenerateHashTree(layerPath, config)
 	if err != nil {
 		return fmt.Errorf("failed to enable dm-verity: %w", err)
 	}
+	config.RootDigest = rootHash
+
+	// Write hash tree if in separate mode
+	if verity.Mode != VerityModeCombined {
+		if err := os.WriteFile(hashDevice, hashTree, 0644); err != nil {
+			return fmt.Errorf("failed to write hash tree: %w", err)
+		}
+	}
 
 	// Store root hash in verity config
-	verity.RootHash = rootHash
+	verity.RootHash = fmt.Sprintf("%x", rootHash)
 	return nil
 }
 
