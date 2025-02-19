@@ -150,17 +150,23 @@ func testErofsDMVerity(t *testing.T, combined bool) {
 	// Calculate DataBlocks based on file size
 	config.DataBlocks = uint64((fi.Size() + int64(config.DataBlockSize) - 1) / int64(config.DataBlockSize))
 
-	// Enable verity
-	rootHash, err := dmverity.Enable(layerPath, hashDevice, config)
+	// Generate hash tree and get root hash
+	hashTree, rootHash, err := dmverity.GenerateHashTree(layerPath, config)
 	if err != nil {
 		t.Fatal(err)
 	}
+	config.RootDigest = rootHash
 
-	config.RootDigest = []byte(rootHash)
+	// Write hash tree if in separate mode
+	if !combined {
+		if err := os.WriteFile(hashDevice, hashTree, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// Create dm-verity device
 	deviceName := fmt.Sprintf("verity-test-%d", os.Getpid())
-	if err := dmverity.CreateVerityTarget(deviceName, layerPath, hashDevice, config); err != nil {
+	if err := dmverity.Enable(deviceName, layerPath, hashDevice, config); err != nil {
 		t.Fatal(err)
 	}
 	defer dmverity.RemoveVerityDevice(deviceName)
@@ -188,7 +194,7 @@ func testErofsDMVerity(t *testing.T, combined bool) {
 
 	// Recreate verity device with corrupted data
 	dmverity.RemoveVerityDevice(deviceName)
-	if err := dmverity.CreateVerityTarget(deviceName, layerPath, hashDevice, config); err != nil {
+	if err := dmverity.Enable(deviceName, layerPath, hashDevice, config); err != nil {
 		t.Logf("veritysetup detected corruption as expected: %v", err)
 	} else {
 		t.Error("corruption was not detected")

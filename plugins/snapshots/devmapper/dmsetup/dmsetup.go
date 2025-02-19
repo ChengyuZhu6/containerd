@@ -444,3 +444,8 @@ func isInUse(deviceName string) (bool, error) {
 	}
 	return info[0].OpenCount != 0, nil
 }
+
+// Dmsetup executes "dmsetup" command with the given args
+func Dmsetup(args ...string) (string, error) {
+	return dmsetup(args...)
+}

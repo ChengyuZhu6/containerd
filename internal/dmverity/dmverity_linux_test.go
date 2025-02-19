@@ -17,10 +17,12 @@
 package dmverity
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/pkg/testutil"
@@ -30,8 +32,7 @@ func TestDmVerity(t *testing.T) {
 	testutil.RequiresRoot(t)
 
 	// Check if veritysetup is available
-	_, err := exec.LookPath("veritysetup")
-	if err != nil {
+	if _, err := exec.LookPath("veritysetup"); err != nil {
 		t.Skip("veritysetup not found, skipping test")
 	}
 
@@ -40,165 +41,57 @@ func TestDmVerity(t *testing.T) {
 }
 
 func testDmVeritySeparate(t *testing.T) {
-	// Create test files
-	dataFile, err := os.CreateTemp("", "verity-data-*")
+	f := setupTest(t, "separate")
+	defer f.cleanup()
+
+	// Generate hash tree
+	header, rootHash, err := GenerateHashTree(f.dataFile.Name(), f.config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(dataFile.Name())
+	f.config.RootDigest = rootHash
 
-	hashFile, err := os.CreateTemp("", "verity-hash-*")
-	if err != nil {
+	// Write hash file
+	if err := os.Truncate(f.hashFile.Name(), 4096); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(hashFile.Name())
-
-	// Prepare test data with full block size
-	testData := make([]byte, DefaultBlockSize)
-	copy(testData, []byte("test data"))
-
-	// Write test data
-	if _, err := dataFile.Write(testData); err != nil {
-		t.Fatal(err)
-	}
-	if err := dataFile.Sync(); err != nil {
+	if err := os.WriteFile(f.hashFile.Name(), header, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Configure verity
-	config := VerityConfig{
-		Version:       1,
-		HashAlgorithm: HashAlgoSHA256,
-		DataBlockSize: DefaultBlockSize,
-		HashBlockSize: DefaultBlockSize,
-		DataBlocks:    1, // One full block
-		Salt:          make([]byte, DefaultSaltSize),
-	}
-
-	// Enable verity
-	rootHash, err := Enable(dataFile.Name(), hashFile.Name(), config)
-	if err != nil {
+	// Enable and verify device
+	if err := Enable(f.deviceName, f.dataLoop, f.hashLoop, f.config); err != nil {
 		t.Fatal(err)
 	}
 
-	if rootHash == "" {
-		t.Error("expected non-empty root hash")
-	}
-
-	t.Logf("Got root hash: %s", rootHash)
-
-	// Create a verity device
-	deviceName := fmt.Sprintf("verity-test-%d", os.Getpid())
-	config.RootDigest = []byte(rootHash)
-
-	// Debug output
-	t.Logf("Creating verity device with name: %s", deviceName)
-	t.Logf("Data device: %s", dataFile.Name())
-	t.Logf("Hash device: %s", hashFile.Name())
-
-	err = CreateVerityTarget(deviceName, dataFile.Name(), hashFile.Name(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer RemoveVerityDevice(deviceName)
-
-	// Verify the device was created
-	if _, err := os.Stat("/dev/mapper/" + deviceName); err != nil {
-		t.Errorf("verity device not found: %v", err)
-	}
+	f.verifyDeviceContent()
+	f.testCorruption()
 }
 
 func testDmVerityCombined(t *testing.T) {
-	// Create test file
-	dataFile, err := os.CreateTemp("", "verity-combined-*")
+	f := setupTest(t, "combined")
+	defer f.cleanup()
+
+	// Generate hash tree
+	header, rootHash, err := GenerateHashTree(f.dataFile.Name(), f.config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(dataFile.Name())
+	f.config.RootDigest = rootHash
 
-	// Prepare test data with full block size
-	testData := make([]byte, DefaultBlockSize)
-	copy(testData, []byte("test data for combined mode"))
-
-	// Write test data
-	if _, err := dataFile.Write(testData); err != nil {
-		t.Fatal(err)
-	}
-	if err := dataFile.Sync(); err != nil {
+	// Write combined data
+	combinedData := append(f.testData, header...)
+	if err := os.WriteFile(f.dataFile.Name(), combinedData, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Get file size for hash offset
-	fi, err := os.Stat(dataFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashOffset := fi.Size()
-
-	// Configure verity
-	config := VerityConfig{
-		Version:       1,
-		HashAlgorithm: HashAlgoSHA256,
-		DataBlockSize: DefaultBlockSize,
-		HashBlockSize: DefaultBlockSize,
-		DataBlocks:    1, // One full block
-		Salt:          make([]byte, DefaultSaltSize),
-		HashOffset:    hashOffset,
-	}
-
-	// Enable verity
-	rootHash, err := Enable(dataFile.Name(), dataFile.Name(), config)
-	if err != nil {
+	// Enable and verify device
+	if err := Enable(f.deviceName, f.dataLoop, f.dataLoop, f.config); err != nil {
 		t.Fatal(err)
 	}
 
-	if rootHash == "" {
-		t.Error("expected non-empty root hash")
-	}
-
-	t.Logf("Got root hash: %s", rootHash)
-
-	// Create a verity device
-	deviceName := fmt.Sprintf("verity-combined-%d", os.Getpid())
-
-	// Debug output
-	t.Logf("Creating combined verity device with name: %s", deviceName)
-	t.Logf("Data+hash device: %s", dataFile.Name())
-	t.Logf("Hash offset: %d", hashOffset)
-
-	// Update config with root hash
-	config.RootDigest = []byte(rootHash)
-
-	err = CreateVerityTarget(deviceName, dataFile.Name(), dataFile.Name(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer RemoveVerityDevice(deviceName)
-
-	// Verify the device was created
-	if _, err := os.Stat("/dev/mapper/" + deviceName); err != nil {
-		t.Errorf("verity device not found: %v", err)
-	}
-
-	// Test corruption detection
-	// First remove the device
-	if err := RemoveVerityDevice(deviceName); err != nil {
-		t.Fatal(err)
-	}
-
-	// Corrupt the data
-	if err := corruptFile(dataFile.Name()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Try to create device with corrupted data
-	err = CreateVerityTarget(deviceName, dataFile.Name(), dataFile.Name(), config)
-	if err == nil {
-		t.Error("expected error when creating device with corrupted data")
-		RemoveVerityDevice(deviceName)
-	} else {
-		t.Logf("Corruption detected as expected: %v", err)
-	}
+	f.verifyDeviceContent()
+	f.testCorruption()
 }
 
 func TestVerityConfig(t *testing.T) {
@@ -299,8 +192,176 @@ func TestVerityConfig(t *testing.T) {
 	}
 }
 
-// Helper functions
+type testFixture struct {
+	t          *testing.T
+	dataFile   *os.File
+	hashFile   *os.File
+	dataLoop   string
+	hashLoop   string
+	deviceName string
+	config     VerityConfig
+	testData   []byte
+}
 
+func setupTest(t *testing.T, mode string) *testFixture {
+	f := &testFixture{t: t}
+
+	// Create test files
+	var err error
+	f.dataFile, err = os.CreateTemp("", "verity-data-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mode == "separate" {
+		f.hashFile, err = os.CreateTemp("", "verity-hash-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Prepare test data with full block size
+	f.testData = make([]byte, DefaultBlockSize)
+	copy(f.testData, []byte("test data"))
+	// Fill the rest of the block with zeros
+	for i := len("test data"); i < len(f.testData); i++ {
+		f.testData[i] = 0
+	}
+
+	// Write test data and truncate to full block size
+	if _, err := f.dataFile.Write(f.testData); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dataFile.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup loop devices
+	f.dataLoop, err = setupLoopDevice(f.dataFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mode == "separate" {
+		f.hashLoop, err = setupLoopDevice(f.hashFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Generate random salt
+	salt := make([]byte, DefaultSaltSize)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure verity
+	f.config = VerityConfig{
+		Version:       1,
+		HashAlgorithm: HashAlgoSHA256,
+		DataBlockSize: DefaultBlockSize,
+		HashBlockSize: DefaultBlockSize,
+		DataBlocks:    1,
+		Salt:          salt,
+	}
+
+	if mode == "combined" {
+		f.config.HashOffset = DefaultBlockSize
+	}
+
+	// Generate device name
+	f.deviceName, err = generateDeviceName("verity-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return f
+}
+
+func (f *testFixture) cleanup() {
+	if f.dataFile != nil {
+		os.Remove(f.dataFile.Name())
+	}
+	if f.hashFile != nil {
+		os.Remove(f.hashFile.Name())
+	}
+	if f.dataLoop != "" {
+		cleanupLoopDevice(f.dataLoop)
+	}
+	if f.hashLoop != "" {
+		cleanupLoopDevice(f.hashLoop)
+	}
+	if f.deviceName != "" {
+		RemoveVerityDevice(f.deviceName)
+	}
+}
+
+func (f *testFixture) verifyDeviceContent() {
+	verityDevice := "/dev/mapper/" + f.deviceName
+	verityFile, err := os.OpenFile(verityDevice, os.O_RDONLY, 0)
+	if err != nil {
+		f.t.Fatalf("failed to open verity device: %v", err)
+	}
+	defer verityFile.Close()
+
+	readData := make([]byte, DefaultBlockSize)
+	if _, err := verityFile.Read(readData); err != nil {
+		f.t.Fatalf("failed to read from verity device: %v", err)
+	}
+
+	if !bytes.Equal(readData, f.testData) {
+		f.t.Errorf("content mismatch:\ngot:  %x\nwant: %x", readData, f.testData)
+	}
+}
+
+func (f *testFixture) testCorruption() {
+	// Close and remove current device
+	if err := RemoveVerityDevice(f.deviceName); err != nil {
+		f.t.Fatalf("failed to remove verity device: %v", err)
+	}
+
+	// Corrupt data and verify detection
+	if err := corruptFile(f.dataFile.Name()); err != nil {
+		f.t.Fatalf("failed to corrupt file: %v", err)
+	}
+
+	// Setup new loop device for corrupted data
+	var err error
+	f.dataLoop, err = setupLoopDevice(f.dataFile.Name())
+	if err != nil {
+		f.t.Fatalf("failed to setup loop device: %v", err)
+	}
+
+	// Try to create device with corrupted data
+	corruptedName := f.deviceName + "-corrupted"
+	hashDev := f.hashLoop
+	if hashDev == "" {
+		hashDev = f.dataLoop
+	}
+
+	err = Enable(corruptedName, f.dataLoop, hashDev, f.config)
+	if err != nil {
+		f.t.Fatalf("failed to enable verity device: %v", err)
+	}
+	defer RemoveVerityDevice(corruptedName)
+
+	// Reading from corrupted device should fail
+	device := "/dev/mapper/" + corruptedName
+	file, err := os.OpenFile(device, os.O_RDONLY, 0)
+	if err != nil {
+		f.t.Fatalf("failed to open corrupted device: %v", err)
+	}
+	defer file.Close()
+
+	data := make([]byte, DefaultBlockSize)
+	if _, err := file.Read(data); err == nil {
+		f.t.Error("expected error when reading from corrupted device")
+	} else {
+		f.t.Logf("Corruption detected as expected: %v", err)
+	}
+}
+
+// Helper functions
 func createTestFile(path string, size int64) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -332,17 +393,34 @@ func corruptFile(path string) error {
 	}
 	defer f.Close()
 
-	// Corrupt a byte in the middle of the file
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-
-	_, err = f.WriteAt([]byte{0xFF}, info.Size()/2)
+	_, err = f.WriteAt([]byte{0xFF}, 0)
 	return err
 }
 
 func removeTarget(name string) error {
 	// Use dmsetup remove
 	return nil // TODO: Implement actual removal using device mapper
+}
+
+func setupLoopDevice(file string) (string, error) {
+	output, err := exec.Command("losetup", "--find", "--show", file).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func cleanupLoopDevice(dev string) error {
+	return exec.Command("losetup", "-d", dev).Run()
+}
+
+// Add this function to generate random device names
+func generateDeviceName(prefix string) (string, error) {
+	// Generate 8 random bytes
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	// Convert to hex string
+	return fmt.Sprintf("%s-%x", prefix, b), nil
 }
