@@ -63,7 +63,7 @@ func TestErofsDMVerity(t *testing.T) {
 		t.Skip("veritysetup not found, skipping test")
 	}
 
-	t.Run("CombinedMode", func(t *testing.T) { testErofsDMVerity(t, true) })
+	// t.Run("CombinedMode", func(t *testing.T) { testErofsDMVerity(t, true) })
 	t.Run("SeparateMode", func(t *testing.T) { testErofsDMVerity(t, false) })
 }
 

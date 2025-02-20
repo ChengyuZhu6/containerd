@@ -65,19 +65,14 @@ func GenerateHashTree(dataDevice string, config VerityConfig) ([]byte, []byte, e
 
 	// Read and hash each data block
 	block := make([]byte, config.DataBlockSize)
-	var rootHash []byte
+	var hashTree []byte
+	var dataBlocks uint64 = 0
 
 	log.Printf("Generating hash tree:")
 	log.Printf("Data block size: %d", config.DataBlockSize)
 	log.Printf("Salt: %x", config.Salt)
 
-	// 如果文件为空，生成一个空块的hash
-	hasher.Reset()
-	hasher.Write(config.Salt)
-	hasher.Write(make([]byte, config.DataBlockSize)) // 使用全0的块
-	rootHash = hasher.Sum(nil)
-
-	// 读取实际数据块
+	// 第一层：计算所有数据块的hash
 	for i := uint64(0); i < config.DataBlocks; i++ {
 		n, err := io.ReadFull(data, block)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -86,6 +81,7 @@ func GenerateHashTree(dataDevice string, config VerityConfig) ([]byte, []byte, e
 		if n == 0 {
 			break
 		}
+		dataBlocks++
 
 		// Calculate current block hash
 		hasher.Reset()
@@ -94,9 +90,25 @@ func GenerateHashTree(dataDevice string, config VerityConfig) ([]byte, []byte, e
 		blockHash := hasher.Sum(nil)
 
 		log.Printf("Block %d hash: %x", i, blockHash)
-		rootHash = blockHash
+		hashTree = append(hashTree, blockHash...)
 	}
 
+	// 如果没有数据块，使用空块
+	if len(hashTree) == 0 {
+		hasher.Reset()
+		hasher.Write(config.Salt)
+		hasher.Write(make([]byte, config.DataBlockSize))
+		hashTree = hasher.Sum(nil)
+		dataBlocks = 1
+	}
+
+	// 计算root hash：对所有block hash再次hash
+	hasher.Reset()
+	hasher.Write(config.Salt)
+	hasher.Write(hashTree)
+	rootHash := hasher.Sum(nil)
+
+	log.Printf("Hash tree: %x", hashTree)
 	log.Printf("Root hash: %x", rootHash)
 
 	// 创建verity header (4096字节)
@@ -122,9 +134,9 @@ func GenerateHashTree(dataDevice string, config VerityConfig) ([]byte, []byte, e
 	// 5. Block sizes and counts
 	binary.LittleEndian.PutUint32(output[64:], config.DataBlockSize)
 	binary.LittleEndian.PutUint32(output[68:], config.HashBlockSize)
-	binary.LittleEndian.PutUint32(output[72:], 1)  // data blocks
-	binary.LittleEndian.PutUint32(output[76:], 0)  // reserved
-	binary.LittleEndian.PutUint32(output[80:], 32) // hash size (sha256 = 32 bytes)
+	binary.LittleEndian.PutUint32(output[72:], uint32(dataBlocks)) // actual data blocks
+	binary.LittleEndian.PutUint32(output[76:], 0)                  // reserved
+	binary.LittleEndian.PutUint32(output[80:], 32)                 // hash size (sha256 = 32 bytes)
 
 	// 6. Hash size and salt at offset 0x50
 	binary.LittleEndian.PutUint32(output[0x50:], 32) // hash size (32 bytes for sha256)

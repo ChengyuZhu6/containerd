@@ -41,7 +41,40 @@ func TestDmVerity(t *testing.T) {
 }
 
 func testDmVeritySeparate(t *testing.T) {
+	t.Run("SingleBlock", testDmVeritySeparateSingleBlock)
+	t.Run("MultipleBlocks", testDmVeritySeparateMultipleBlocks)
+}
+
+func testDmVeritySeparateSingleBlock(t *testing.T) {
 	f := setupTest(t, "separate")
+	defer f.cleanup()
+
+	// Generate hash tree
+	header, rootHash, err := GenerateHashTree(f.dataFile.Name(), f.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.config.RootDigest = rootHash
+
+	// Write hash file
+	if err := os.Truncate(f.hashFile.Name(), 4096); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.hashFile.Name(), header, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable and verify device
+	if err := Enable(f.deviceName, f.dataLoop, f.hashLoop, f.config); err != nil {
+		t.Fatal(err)
+	}
+
+	f.verifyDeviceContent()
+	f.testCorruption()
+}
+
+func testDmVeritySeparateMultipleBlocks(t *testing.T) {
+	f := setupTestMultiBlock(t, "separate")
 	defer f.cleanup()
 
 	// Generate hash tree
@@ -267,6 +300,80 @@ func setupTest(t *testing.T, mode string) *testFixture {
 
 	if mode == "combined" {
 		f.config.HashOffset = DefaultBlockSize
+	}
+
+	// Generate device name
+	f.deviceName, err = generateDeviceName("verity-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return f
+}
+
+func setupTestMultiBlock(t *testing.T, mode string) *testFixture {
+	f := &testFixture{t: t}
+
+	// Create test files
+	var err error
+	f.dataFile, err = os.CreateTemp("", "verity-data-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mode == "separate" {
+		f.hashFile, err = os.CreateTemp("", "verity-hash-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Prepare multiple blocks of test data
+	numBlocks := uint64(3)
+	f.testData = make([]byte, DefaultBlockSize*numBlocks)
+	for i := uint64(0); i < numBlocks; i++ {
+		copy(f.testData[i*DefaultBlockSize:], []byte(fmt.Sprintf("test data block %d", i)))
+	}
+
+	// Write test data
+	if _, err := f.dataFile.Write(f.testData); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dataFile.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup loop devices
+	f.dataLoop, err = setupLoopDevice(f.dataFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mode == "separate" {
+		f.hashLoop, err = setupLoopDevice(f.hashFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Generate random salt
+	salt := make([]byte, DefaultSaltSize)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure verity
+	f.config = VerityConfig{
+		Version:       1,
+		HashAlgorithm: HashAlgoSHA256,
+		DataBlockSize: DefaultBlockSize,
+		HashBlockSize: DefaultBlockSize,
+		DataBlocks:    numBlocks,
+		Salt:          salt,
+	}
+
+	if mode == "combined" {
+		f.config.HashOffset = int64(DefaultBlockSize * numBlocks)
 	}
 
 	// Generate device name
