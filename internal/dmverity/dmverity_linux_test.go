@@ -386,12 +386,12 @@ func setupTestMultiBlock(t *testing.T, mode string) *testFixture {
 }
 
 func (f *testFixture) cleanup() {
-	if f.dataFile != nil {
-		os.Remove(f.dataFile.Name())
-	}
-	if f.hashFile != nil {
-		os.Remove(f.hashFile.Name())
-	}
+	// if f.dataFile != nil {
+	// 	os.Remove(f.dataFile.Name())
+	// }
+	// if f.hashFile != nil {
+	// 	os.Remove(f.hashFile.Name())
+	// }
 	if f.dataLoop != "" {
 		cleanupLoopDevice(f.dataLoop)
 	}
