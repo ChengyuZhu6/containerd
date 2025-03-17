@@ -758,11 +758,13 @@ func (rt *pullRequestReporterRoundTripper) RoundTrip(req *http.Request) (*http.R
 // See https://github.com/containerd/containerd/issues/6657
 func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, imageRef string,
 	s *runtime.PodSandboxConfig) (string, error) {
+	log.G(ctx).Infof("!!!snapshotterFromPodSandboxConfig: %v", s)
 	snapshotter := c.config.Snapshotter
 	if s == nil || s.Annotations == nil {
 		return snapshotter, nil
 	}
-
+	log.G(ctx).Infof("!!! s.Annotations: %v", s.Annotations)
+	log.G(ctx).Infof("!!! s.Annotations[annotations.RuntimeHandler]: %v", s.Annotations[annotations.RuntimeHandler])
 	// TODO(kiashok): honor the new CRI runtime handler field added to v0.29.0
 	// for image pull per runtime class support.
 	runtimeHandler, ok := s.Annotations[annotations.RuntimeHandler]
