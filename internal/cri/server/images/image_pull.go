@@ -771,7 +771,7 @@ func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, i
 	if !ok {
 		return snapshotter, nil
 	}
-
+	log.G(ctx).Infof("!!! runtimePlatforms[runtimeHandler]: %v", c.runtimePlatforms[runtimeHandler])
 	// TODO: Ensure error is returned if runtime not found?
 	if c.runtimePlatforms != nil {
 		if p, ok := c.runtimePlatforms[runtimeHandler]; ok && p.Snapshotter != snapshotter {
