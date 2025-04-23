@@ -18,11 +18,13 @@ package erofsutils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/mount"
@@ -95,4 +97,88 @@ func MountsToLayer(mounts []mount.Mount) (string, error) {
 		return "", fmt.Errorf("mount layer type must be erofs-layer: %w", errdefs.ErrNotImplemented)
 	}
 	return layer, nil
+}
+
+func CreateErofsWithDmverity(layerPath string, srcDir string, mkfsExtraOpts []string) error {
+	fileInfo, err := os.Stat(layerPath)
+	if err != nil {
+		return fmt.Errorf("get file info failed: %v", err)
+	}
+	fileSize := uint64(fileInfo.Size())
+
+	cmd := exec.Command("veritysetup", "format", "--format=1",
+		"--no-superblock",
+		"--hash", "sha256",
+		"--data-block-size", "4096",
+		"--hash-block-size", "4096",
+		"--data-blocks", strconv.FormatUint(fileSize/4096, 10),
+		"--salt", "1234000000000000000000000000000000000000000000000000000000000000",
+		layerPath, layerPath+".verity")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("veritysetup failed: %w", err)
+	}
+	log.L.Infof("running %s %s %v", cmd.Path, cmd.Args, string(output))
+
+	err = parseVerityOutputToJSON(string(output), layerPath+".json")
+	if err != nil {
+		return fmt.Errorf("failed to create JSON: %w", err)
+	}
+
+	return nil
+}
+
+func parseVerityOutputToJSON(output string, jsonPath string) error {
+	lines := strings.Split(output, "\n")
+
+	verityInfo := make(map[string]string)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "UUID":
+			verityInfo["uuid"] = value
+		case "Hash type":
+			verityInfo["hash_type"] = value
+		case "Data blocks":
+			verityInfo["data_blocks"] = value
+		case "Data block size":
+			verityInfo["data_block_size"] = value
+		case "Hash blocks":
+			verityInfo["hash_blocks"] = value
+		case "Hash block size":
+			verityInfo["hash_block_size"] = value
+		case "Hash algorithm":
+			verityInfo["hash_algorithm"] = value
+		case "Salt":
+			verityInfo["salt"] = value
+		case "Root hash":
+			verityInfo["root_hash"] = value
+		case "Hash device size":
+			parts := strings.Split(value, " ")
+			if len(parts) > 0 {
+				verityInfo["hash_device_size"] = parts[0]
+			}
+		}
+	}
+
+	jsonData, err := json.MarshalIndent(verityInfo, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(jsonPath, jsonData, 0644)
 }

@@ -221,6 +221,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			if snap.Kind != snapshots.KindView {
 				return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
 			}
+			err = erofsutils.CreateErofsWithDmverity(m.Source, m.Source, nil)
+			if err != nil {
+				return nil, err
+			}
 			if s.enableFsverity {
 				if err := s.verifyFsverity(m.Source); err != nil {
 					return nil, err
@@ -433,6 +437,11 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 					log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
 				}
 			}
+		}
+
+		err = erofsutils.CreateErofsWithDmverity(layerBlob, upperDir, nil)
+		if err != nil {
+			return err
 		}
 
 		// Enable fsverity on the EROFS layer if configured
