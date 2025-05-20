@@ -87,7 +87,7 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 	}
 
 	cmdArgs = append(cmdArgs, args...)
-
+	fmt.Println("veritysetup command: veritysetup", cmdArgs)
 	execCmd := exec.Command("veritysetup", cmdArgs...)
 	output, err := execCmd.CombinedOutput()
 	if err != nil {
@@ -101,6 +101,20 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 // If hashDevice is the same as dataDevice, the hash will be stored on the same device
 func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutputInfo, error) {
 	args := []string{dataDevice, hashDevice}
+	if dataDevice == hashDevice {
+		fileInfo, err := os.Stat(dataDevice)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat data device: %w", err)
+		}
+		if opts.HashOffset == 0 {
+			opts.HashOffset = uint64(fileInfo.Size())
+		}
+		dataBlocks := (opts.HashOffset + opts.DataBlockSize - 1) / opts.DataBlockSize
+		opts.HashOffset = dataBlocks * opts.DataBlockSize
+
+		args = append(args, fmt.Sprintf("--hash-offset=%d", opts.HashOffset))
+		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
+	}
 	output, err := actions(FormatCommand, args, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to format dm-verity device: %w, output: %s", err, output)
@@ -118,6 +132,19 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutput
 // Open creates a read-only device-mapper target for transparent integrity verification
 func Open(dataDevice string, name string, hashDevice string, rootHash string, opts *DmverityOptions) (string, error) {
 	args := []string{dataDevice, name, hashDevice, rootHash}
+	if dataDevice == hashDevice {
+		fileInfo, err := os.Stat(dataDevice)
+		if err != nil {
+			return "", fmt.Errorf("failed to stat data device: %w", err)
+		}
+		if opts.HashOffset == 0 {
+			opts.HashOffset = uint64(fileInfo.Size())
+		}
+		dataBlocks := (opts.HashOffset + opts.DataBlockSize - 1) / opts.DataBlockSize
+		opts.HashOffset = dataBlocks * opts.DataBlockSize
+		args = append(args, fmt.Sprintf("--hash-offset=%d", opts.HashOffset))
+		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
+	}
 	output, err := actions(OpenCommand, args, opts)
 	if err != nil {
 		return "", fmt.Errorf("failed to open dm-verity device: %w, output: %s", err, output)
@@ -133,4 +160,20 @@ func Close(name string) (string, error) {
 		return "", fmt.Errorf("failed to close dm-verity device: %w, output: %s", err, output)
 	}
 	return output, nil
+}
+
+func Status(name string) (*StatusInfo, error) {
+	args := []string{name}
+	output, err := actions(StatusCommand, args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dm-verity device status: %w, output: %s", err, output)
+	}
+
+	// Parse the output to extract structured information
+	info, err := ParseStatusOutput(output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse status output: %w", err)
+	}
+
+	return info, nil
 }

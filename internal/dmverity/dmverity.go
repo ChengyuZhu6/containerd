@@ -33,6 +33,8 @@ const (
 	OpenCommand VeritySetupCommand = "open"
 	// CloseCommand corresponds to "veritysetup close"
 	CloseCommand VeritySetupCommand = "close"
+	// StatusCommand corresponds to "veritysetup status"
+	StatusCommand VeritySetupCommand = "status"
 )
 
 // DmverityOptions contains configuration options for dm-verity operations
@@ -42,15 +44,15 @@ type DmverityOptions struct {
 	// Hash algorithm to use (default: sha256)
 	HashAlgorithm string
 	// Size of data blocks in bytes (default: 4096)
-	DataBlockSize uint32
+	DataBlockSize uint64
 	// Size of hash blocks in bytes (default: 4096)
-	HashBlockSize uint32
+	HashBlockSize uint64
 	// Number of data blocks
 	DataBlocks uint64
 	// Offset of hash area in bytes
 	HashOffset uint64
 	// Hash type (default: 1)
-	HashType uint32
+	HashType uint64
 	// Superblock usage flag (false meaning --no-superblock)
 	UseSuperblock bool
 	// Debug flag
@@ -66,6 +68,8 @@ func DefaultDmverityOptions() DmverityOptions {
 		DataBlockSize: 4096,
 		HashBlockSize: 4096,
 		HashType:      1,
+		UseSuperblock: false,
+		Salt:          "1234000000000000000000000000000000000000000000000000000000000000",
 	}
 }
 
@@ -106,7 +110,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Hash type":
 			hashType, err := strconv.Atoi(value)
 			if err == nil {
-				info.HashType = uint32(hashType)
+				info.HashType = uint64(hashType)
 			}
 		case "Data blocks":
 			dataBlocks, err := strconv.ParseInt(value, 10, 64)
@@ -116,7 +120,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Data block size":
 			dataBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err == nil {
-				info.DataBlockSize = uint32(dataBlockSize)
+				info.DataBlockSize = uint64(dataBlockSize)
 			}
 		case "Hash blocks":
 			hashBlocks, err := strconv.ParseInt(value, 10, 64)
@@ -126,7 +130,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Hash block size":
 			hashBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err == nil {
-				info.HashBlockSize = uint32(hashBlockSize)
+				info.HashBlockSize = uint64(hashBlockSize)
 			}
 		case "Hash algorithm":
 			info.HashAlgorithm = value
@@ -138,4 +142,69 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 	}
 
 	return info, scanner.Err()
+}
+
+// StatusInfo represents the parsed information from veritysetup status command output
+type StatusInfo struct {
+	// Device path
+	Device string
+	// Whether the device is active
+	IsActive bool
+	// Whether the device is in use
+	InUse bool
+	// Type of the device (e.g., "VERITY")
+	Type string
+	// Status of verification (e.g., "verified")
+	Status string
+}
+
+// ParseStatusOutput parses the output from veritysetup status command
+// and returns a structured representation of the information
+func ParseStatusOutput(output string) (*StatusInfo, error) {
+	info := &StatusInfo{}
+
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and command echo lines
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse the first line: "/dev/mapper/containerd-erofs-1 is active and is in use."
+		if strings.Contains(line, " is ") {
+			info.Device = strings.Fields(line)[0]
+			info.IsActive = strings.Contains(line, "active")
+			info.InUse = strings.Contains(line, "in use")
+			continue
+		}
+
+		// Parse key-value pairs
+		parts := strings.Split(line, ":")
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "type":
+			info.Type = value
+		case "status":
+			info.Status = value
+		}
+	}
+
+	return info, scanner.Err()
+}
+
+// IsVerified checks if the dm-verity device status is "verified"
+func (s *StatusInfo) IsVerified() bool {
+	return s.Status == "verified"
+}
+
+func (s *StatusInfo) IsInUse() bool {
+	return s.IsActive && s.InUse
 }

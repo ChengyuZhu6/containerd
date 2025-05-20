@@ -121,3 +121,57 @@ func createLoopbackDevice(t *testing.T, dir string, size string) (string, string
 
 	return imagePath, loopDevice
 }
+
+func TestParseStatusOutput(t *testing.T) {
+	testutil.RequiresRoot(t)
+
+	tests := []struct {
+		name     string
+		output   string
+		expected *StatusInfo
+	}{
+		{
+			name: "verified status",
+			output: `# veritysetup status containerd-erofs-1
+/dev/mapper/containerd-erofs-1 is active and is in use.
+  type:        VERITY
+  status:      verified`,
+			expected: &StatusInfo{
+				Device:   "/dev/mapper/containerd-erofs-1",
+				IsActive: true,
+				InUse:    true,
+				Type:     "VERITY",
+				Status:   "verified",
+			},
+		},
+		{
+			name: "corrupted status",
+			output: `# veritysetup status containerd-erofs-1
+/dev/mapper/containerd-erofs-1 is active and is in use.
+  type:        VERITY
+  status:      corrupted`,
+			expected: &StatusInfo{
+				Device:   "/dev/mapper/containerd-erofs-1",
+				IsActive: true,
+				InUse:    true,
+				Type:     "VERITY",
+				Status:   "corrupted",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ParseStatusOutput(tt.output)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+
+			// Test IsVerified method
+			if tt.expected.Status == "verified" {
+				assert.True(t, result.IsVerified())
+			} else {
+				assert.False(t, result.IsVerified())
+			}
+		})
+	}
+}
