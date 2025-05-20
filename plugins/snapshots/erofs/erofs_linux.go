@@ -33,6 +33,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 	"github.com/containerd/containerd/v2/internal/fsverity"
 )
@@ -138,6 +139,16 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		}
 		if !supported {
 			return nil, fmt.Errorf("fsverity is not supported on the filesystem of %q", root)
+		}
+	}
+
+	if config.enableDmverity {
+		supported, err := dmverity.IsSupported()
+		if err != nil {
+			return nil, fmt.Errorf("failed to check dmverity support on %q: %w", root, err)
+		}
+		if !supported {
+			return nil, fmt.Errorf("dmverity is not supported on the filesystem of %q", root)
 		}
 	}
 
@@ -369,6 +380,13 @@ func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 	return s.createSnapshot(ctx, snapshots.KindView, key, parent, opts)
 }
 
+func (s *snapshotter) isLayerWithDmverity(id string) bool {
+	if _, err := os.Stat(filepath.Join(s.root, "snapshots", id, ".dmverity")); err != nil {
+		return false
+	}
+	return true
+}
+
 func setImmutable(path string, enable bool) error {
 	//nolint:revive	// silence "don't use ALL_CAPS in Go names; use CamelCase"
 	const (
@@ -442,6 +460,19 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 				return fmt.Errorf("failed to enable fsverity: %w", err)
 			}
 		}
+
+		if s.enableDmverity {
+			if !s.isLayerWithDmverity(id) {
+				info, err := dmverity.Format(layerBlob, layerBlob, nil)
+				if err != nil {
+					return fmt.Errorf("failed to format dmverity: %w", err)
+				}
+				if err := os.WriteFile(filepath.Join(layerBlob, ".dmverity"), []byte(info.RootHash), 0644); err != nil {
+					return fmt.Errorf("failed to write dmverity root hash: %w", err)
+				}
+			}
+		}
+
 		// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
 		if err := setImmutable(layerBlob, true); err != nil {
 			log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)

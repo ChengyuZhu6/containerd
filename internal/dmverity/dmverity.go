@@ -66,6 +66,7 @@ func DefaultDmverityOptions() DmverityOptions {
 		DataBlockSize: 4096,
 		HashBlockSize: 4096,
 		HashType:      1,
+		UseSuperblock: false,
 	}
 }
 
