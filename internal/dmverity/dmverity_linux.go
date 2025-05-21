@@ -87,7 +87,7 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 	}
 
 	cmdArgs = append(cmdArgs, args...)
-
+	fmt.Println("veritysetup command: veritysetup", cmdArgs)
 	execCmd := exec.Command("veritysetup", cmdArgs...)
 	output, err := execCmd.CombinedOutput()
 	if err != nil {
@@ -101,6 +101,17 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 // If hashDevice is the same as dataDevice, the hash will be stored on the same device
 func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutputInfo, error) {
 	args := []string{dataDevice, hashDevice}
+	if dataDevice == hashDevice {
+		fileInfo, err := os.Stat(dataDevice)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat data device: %w", err)
+		}
+		hashOffset := fileInfo.Size()
+		dataBlocks := hashOffset / int64(opts.DataBlockSize)
+
+		args = append(args, fmt.Sprintf("--hash-offset=%d", hashOffset))
+		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
+	}
 	output, err := actions(FormatCommand, args, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to format dm-verity device: %w, output: %s", err, output)
@@ -118,6 +129,17 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutput
 // Open creates a read-only device-mapper target for transparent integrity verification
 func Open(dataDevice string, name string, hashDevice string, rootHash string, opts *DmverityOptions) (string, error) {
 	args := []string{dataDevice, name, hashDevice, rootHash}
+	if dataDevice == hashDevice {
+		fileInfo, err := os.Stat(dataDevice)
+		if err != nil {
+			return "", fmt.Errorf("failed to stat data device: %w", err)
+		}
+		hashOffset := fileInfo.Size()
+		dataBlocks := hashOffset / int64(opts.DataBlockSize)
+
+		args = append(args, fmt.Sprintf("--hash-offset=%d", hashOffset))
+		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
+	}
 	output, err := actions(OpenCommand, args, opts)
 	if err != nil {
 		return "", fmt.Errorf("failed to open dm-verity device: %w, output: %s", err, output)

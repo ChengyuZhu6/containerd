@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
@@ -172,6 +173,24 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 
 // Close closes the snapshotter
 func (s *snapshotter) Close() error {
+	// If dmverity is enabled, try to close all devices
+	if s.enableDmverity {
+		// Get a list of all snapshots
+		err := s.ms.WithTransaction(context.Background(), false, func(ctx context.Context) error {
+			return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+				if info.Kind == snapshots.KindCommitted {
+					// Close the device if it exists
+					if err := s.closeDmverityDevice(info.Name); err != nil {
+						log.L.WithError(err).Warnf("failed to close dmverity device for %v", info.Name)
+					}
+				}
+				return nil
+			})
+		})
+		if err != nil {
+			log.L.WithError(err).Warn("error closing dmverity devices")
+		}
+	}
 	return s.ms.Close()
 }
 
@@ -192,6 +211,38 @@ func (s *snapshotter) lowerPath(id string) (mount.Mount, string, error) {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return mount.Mount{}, "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
+	}
+
+	// Check if dmverity is enabled and if this layer has dmverity enabled
+	if s.enableDmverity && s.isLayerWithDmverity(id) {
+		rootHash, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
+		if err != nil {
+			return mount.Mount{}, "", fmt.Errorf("failed to read dmverity root hash: %w", err)
+		}
+
+		dmName := fmt.Sprintf("containerd-erofs-%s", id)
+
+		devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
+		if _, err := os.Stat(devicePath); err != nil {
+			opts := dmverity.DefaultDmverityOptions()
+			_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
+			if err != nil {
+				return mount.Mount{}, "", fmt.Errorf("failed to open dmverity device: %w", err)
+			}
+
+			for i := 0; i < 10; i++ {
+				if _, err := os.Stat(devicePath); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+
+		return mount.Mount{
+			Source:  devicePath,
+			Type:    "erofs",
+			Options: []string{"ro"},
+		}, s.upperPath(id), nil
 	}
 
 	return mount.Mount{
@@ -239,7 +290,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				}
 			}
 			// We have to force a loop device here since mount[] is static.
-			m.Options = append(m.Options, "loop")
+			// However, if we're using dmverity, it's already a block device
+			if !s.enableDmverity || !strings.HasPrefix(m.Source, "/dev/mapper/") {
+				m.Options = append(m.Options, "loop")
+			}
 			return []mount.Mount{m}, nil
 		}
 		// if we only have one layer/no parents then just return a bind mount as overlay
@@ -271,7 +325,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			return nil, err
 		}
 		// We have to force a loop device here too since mount[] is static.
-		m.Options = append(m.Options, "loop")
+		// However, if we're using dmverity, it's already a block device
+		if !s.enableDmverity || !strings.HasPrefix(m.Source, "/dev/mapper/") {
+			m.Options = append(m.Options, "loop")
+		}
 		return []mount.Mount{m}, nil
 	}
 
@@ -287,7 +344,8 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		if mntpoint != m.Source && !isErofs(mntpoint) {
 			err := m.Mount(mntpoint)
 			// Use loop if the current kernel (6.12+) doesn't support file-backed mount
-			if err == unix.ENOTBLK {
+			// Skip 'loop' if using dmverity device
+			if err == unix.ENOTBLK && (!s.enableDmverity || !strings.HasPrefix(m.Source, "/dev/mapper/")) {
 				m.Options = append(m.Options, "loop")
 				err = m.Mount(mntpoint)
 			}
@@ -463,11 +521,12 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 		if s.enableDmverity {
 			if !s.isLayerWithDmverity(id) {
-				info, err := dmverity.Format(layerBlob, layerBlob, nil)
+				opts := dmverity.DefaultDmverityOptions()
+				info, err := dmverity.Format(layerBlob, layerBlob, &opts)
 				if err != nil {
 					return fmt.Errorf("failed to format dmverity: %w", err)
 				}
-				if err := os.WriteFile(filepath.Join(layerBlob, ".dmverity"), []byte(info.RootHash), 0644); err != nil {
+				if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(info.RootHash), 0644); err != nil {
 					return fmt.Errorf("failed to write dmverity root hash: %w", err)
 				}
 			}
@@ -563,6 +622,11 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 				log.G(ctx).Warnf("failed to unmount EROFS mount for %v", id)
 			}
 
+			// Close dmverity device if it exists
+			if err := s.closeDmverityDevice(id); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
+			}
+
 			for _, dir := range removals {
 				if err := os.RemoveAll(dir); err != nil {
 					log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
@@ -584,6 +648,11 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 		// The layer blob is only persisted for committed snapshots.
 		if k == snapshots.KindCommitted {
+			// Close dmverity device first if it exists
+			if err := s.closeDmverityDevice(id); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
+			}
+
 			// Clear IMMUTABLE_FL before removal, since this flag avoids it.
 			err = setImmutable(s.layerBlobPath(id), false)
 			if err != nil {
@@ -666,6 +735,21 @@ func (s *snapshotter) verifyFsverity(path string) error {
 	}
 	if !enabled {
 		return fmt.Errorf("fsverity is not enabled on %s", path)
+	}
+	return nil
+}
+
+// closeDmverityDevice closes the dmverity device for a specific snapshot ID
+func (s *snapshotter) closeDmverityDevice(id string) error {
+	if !s.enableDmverity || !s.isLayerWithDmverity(id) {
+		return nil
+	}
+
+	dmName := fmt.Sprintf("containerd-erofs-%s", id)
+	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
+	if _, err := os.Stat(devicePath); err == nil {
+		_, err = dmverity.Close(dmName)
+		return err
 	}
 	return nil
 }
