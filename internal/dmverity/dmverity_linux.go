@@ -107,7 +107,8 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutput
 			return nil, fmt.Errorf("failed to stat data device: %w", err)
 		}
 		hashOffset := fileInfo.Size()
-		dataBlocks := hashOffset / int64(opts.DataBlockSize)
+		dataBlocks := (hashOffset + int64(opts.DataBlockSize) - 1) / int64(opts.DataBlockSize)
+		hashOffset = dataBlocks * int64(opts.DataBlockSize)
 
 		args = append(args, fmt.Sprintf("--hash-offset=%d", hashOffset))
 		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
@@ -134,10 +135,12 @@ func Open(dataDevice string, name string, hashDevice string, rootHash string, op
 		if err != nil {
 			return "", fmt.Errorf("failed to stat data device: %w", err)
 		}
-		hashOffset := fileInfo.Size()
-		dataBlocks := hashOffset / int64(opts.DataBlockSize)
-
-		args = append(args, fmt.Sprintf("--hash-offset=%d", hashOffset))
+		if opts.HashOffset == 0 {
+			opts.HashOffset = uint64(fileInfo.Size())
+		}
+		dataBlocks := (opts.HashOffset + opts.DataBlockSize - 1) / opts.DataBlockSize
+		opts.HashOffset = dataBlocks * opts.DataBlockSize
+		args = append(args, fmt.Sprintf("--hash-offset=%d", opts.HashOffset))
 		args = append(args, fmt.Sprintf("--data-blocks=%d", dataBlocks))
 	}
 	output, err := actions(OpenCommand, args, opts)
