@@ -42,15 +42,15 @@ type DmverityOptions struct {
 	// Hash algorithm to use (default: sha256)
 	HashAlgorithm string
 	// Size of data blocks in bytes (default: 4096)
-	DataBlockSize uint32
+	DataBlockSize uint64
 	// Size of hash blocks in bytes (default: 4096)
-	HashBlockSize uint32
+	HashBlockSize uint64
 	// Number of data blocks
 	DataBlocks uint64
 	// Offset of hash area in bytes
 	HashOffset uint64
 	// Hash type (default: 1)
-	HashType uint32
+	HashType uint64
 	// Superblock usage flag (false meaning --no-superblock)
 	UseSuperblock bool
 	// Debug flag
@@ -67,6 +67,7 @@ func DefaultDmverityOptions() DmverityOptions {
 		HashBlockSize: 4096,
 		HashType:      1,
 		UseSuperblock: false,
+		Salt:          "1234000000000000000000000000000000000000000000000000000000000000",
 	}
 }
 
@@ -107,7 +108,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Hash type":
 			hashType, err := strconv.Atoi(value)
 			if err == nil {
-				info.HashType = uint32(hashType)
+				info.HashType = uint64(hashType)
 			}
 		case "Data blocks":
 			dataBlocks, err := strconv.ParseInt(value, 10, 64)
@@ -117,7 +118,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Data block size":
 			dataBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err == nil {
-				info.DataBlockSize = uint32(dataBlockSize)
+				info.DataBlockSize = uint64(dataBlockSize)
 			}
 		case "Hash blocks":
 			hashBlocks, err := strconv.ParseInt(value, 10, 64)
@@ -127,7 +128,7 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		case "Hash block size":
 			hashBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err == nil {
-				info.HashBlockSize = uint32(hashBlockSize)
+				info.HashBlockSize = uint64(hashBlockSize)
 			}
 		case "Hash algorithm":
 			info.HashAlgorithm = value

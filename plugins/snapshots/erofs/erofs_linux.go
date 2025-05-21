@@ -22,14 +22,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/containerd/continuity/fs"
-	"github.com/containerd/log"
-	"github.com/containerd/plugin"
-	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -37,6 +33,10 @@ import (
 	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 	"github.com/containerd/containerd/v2/internal/fsverity"
+	"github.com/containerd/continuity/fs"
+	"github.com/containerd/log"
+	"github.com/containerd/plugin"
+	"golang.org/x/sys/unix"
 )
 
 // SnapshotterConfig is used to configure the erofs snapshotter instance
@@ -207,42 +207,84 @@ func (s *snapshotter) layerBlobPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "layer.erofs")
 }
 
+func (s *snapshotter) runDmverity(id string) (string, error) {
+	layerBlob := s.layerBlobPath(id)
+	if _, err := os.Stat(layerBlob); err != nil {
+		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
+	}
+	fmt.Println("dmverity enabled for layer:", id)
+	if !s.isLayerWithDmverity(id) {
+		fmt.Println("formatting dmverity")
+		opts := dmverity.DefaultDmverityOptions()
+		fileinfo, err := os.Stat(layerBlob)
+		if err != nil {
+			return "", fmt.Errorf("failed to stat layer blob: %w", err)
+		}
+
+		// Open file for truncating
+		f, err := os.OpenFile(layerBlob, os.O_RDWR, 0644)
+		if err != nil {
+			return "", fmt.Errorf("failed to open layer blob for truncating: %w", err)
+		}
+		defer f.Close()
+		file_size := fileinfo.Size()
+		// Truncate the file to double its size
+		if err := f.Truncate(file_size * 2); err != nil {
+			return "", fmt.Errorf("failed to truncate layer blob: %w", err)
+		}
+		opts.HashOffset = uint64(file_size)
+		info, err := dmverity.Format(layerBlob, layerBlob, &opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to format dmverity: %w", err)
+		}
+		dmverityData := fmt.Sprintf("%s|%d", info.RootHash, fileinfo.Size())
+		fmt.Println("dmverityData", dmverityData)
+		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
+			return "", fmt.Errorf("failed to write dmverity root hash: %w", err)
+		}
+	}
+	fmt.Println("reading dmverity root hash")
+	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
+	if err != nil {
+		return "", fmt.Errorf("failed to read dmverity root hash: %w", err)
+	}
+
+	parts := strings.Split(string(dmverityContent), "|")
+	rootHash := parts[0]
+	var originalSize uint64
+	if len(parts) > 1 {
+		fmt.Println("original layer size:", parts[1])
+		var err error
+		originalSize, err = strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse original size: %w", err)
+		}
+	}
+
+	dmName := fmt.Sprintf("containerd-erofs-%s", id)
+	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
+	if _, err := os.Stat(devicePath); err != nil {
+		opts := dmverity.DefaultDmverityOptions()
+		opts.HashOffset = originalSize
+		_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to open dmverity device: %w", err)
+		}
+
+		for i := 0; i < 10; i++ {
+			if _, err := os.Stat(devicePath); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return devicePath, nil
+}
+
 func (s *snapshotter) lowerPath(id string) (mount.Mount, string, error) {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return mount.Mount{}, "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
-	}
-
-	// Check if dmverity is enabled and if this layer has dmverity enabled
-	if s.enableDmverity && s.isLayerWithDmverity(id) {
-		rootHash, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
-		if err != nil {
-			return mount.Mount{}, "", fmt.Errorf("failed to read dmverity root hash: %w", err)
-		}
-
-		dmName := fmt.Sprintf("containerd-erofs-%s", id)
-
-		devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
-		if _, err := os.Stat(devicePath); err != nil {
-			opts := dmverity.DefaultDmverityOptions()
-			_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
-			if err != nil {
-				return mount.Mount{}, "", fmt.Errorf("failed to open dmverity device: %w", err)
-			}
-
-			for i := 0; i < 10; i++ {
-				if _, err := os.Stat(devicePath); err == nil {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-
-		return mount.Mount{
-			Source:  devicePath,
-			Type:    "erofs",
-			Options: []string{"ro"},
-		}, s.upperPath(id), nil
 	}
 
 	return mount.Mount{
@@ -278,8 +320,11 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	var options []string
 
+	fmt.Println("mounts called")
 	if len(snap.ParentIDs) == 0 {
-		m, _, err := s.lowerPath(snap.ID)
+		fmt.Println("no parent ids")
+		m, mntpoint, err := s.lowerPath(snap.ID)
+		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		if err == nil {
 			if snap.Kind != snapshots.KindView {
 				return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
@@ -288,6 +333,13 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				if err := s.verifyFsverity(m.Source); err != nil {
 					return nil, err
 				}
+			}
+			if s.enableDmverity {
+				devicePath, err := s.runDmverity(snap.ID)
+				if err != nil {
+					return nil, err
+				}
+				m.Source = devicePath
 			}
 			// We have to force a loop device here since mount[] is static.
 			// However, if we're using dmverity, it's already a block device
@@ -314,24 +366,35 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		}, nil
 	}
 
+	fmt.Println("snap.Kind", snap.Kind)
 	if snap.Kind == snapshots.KindActive {
 		options = append(options,
 			fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
 			fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
 		)
 	} else if len(snap.ParentIDs) == 1 {
-		m, _, err := s.lowerPath(snap.ParentIDs[0])
+		fmt.Println("len(snap.ParentIDs) == 1")
+		m, mntpoint, err := s.lowerPath(snap.ParentIDs[0])
 		if err != nil {
 			return nil, err
 		}
+		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
+		// if s.enableDmverity {
+		// 	devicePath, err := s.runDmverity(snap.ParentIDs[0])
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+		// 	m.Source = devicePath
+		// }
 		// We have to force a loop device here too since mount[] is static.
 		// However, if we're using dmverity, it's already a block device
-		if !s.enableDmverity || !strings.HasPrefix(m.Source, "/dev/mapper/") {
+		if !strings.HasPrefix(m.Source, "/dev/mapper/") {
 			m.Options = append(m.Options, "loop")
 		}
 		return []mount.Mount{m}, nil
 	}
 
+	fmt.Println("snap.ParentIDs", snap.ParentIDs)
 	var lowerdirs []string
 	for i := range snap.ParentIDs {
 		m, mntpoint, err := s.lowerPath(snap.ParentIDs[i])
@@ -353,11 +416,19 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				return nil, err
 			}
 		}
+		if s.enableDmverity {
+			devicePath, err := s.runDmverity(snap.ParentIDs[i])
+			if err != nil {
+				return nil, err
+			}
+			m.Source = devicePath
+		}
+		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		lowerdirs = append(lowerdirs, mntpoint)
 	}
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(lowerdirs, ":")))
 	options = append(options, s.ovlOptions...)
-
+	fmt.Printf("options = %v\n", options)
 	return []mount.Mount{{
 		Type:    "overlay",
 		Source:  "overlay",
@@ -520,15 +591,9 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 
 		if s.enableDmverity {
-			if !s.isLayerWithDmverity(id) {
-				opts := dmverity.DefaultDmverityOptions()
-				info, err := dmverity.Format(layerBlob, layerBlob, &opts)
-				if err != nil {
-					return fmt.Errorf("failed to format dmverity: %w", err)
-				}
-				if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(info.RootHash), 0644); err != nil {
-					return fmt.Errorf("failed to write dmverity root hash: %w", err)
-				}
+			_, err := s.runDmverity(id)
+			if err != nil {
+				return fmt.Errorf("failed to run dmverity: %w", err)
 			}
 		}
 
