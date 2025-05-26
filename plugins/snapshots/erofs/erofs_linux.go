@@ -280,6 +280,12 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 			return "", fmt.Errorf("failed to write dmverity root hash: %w", err)
 		}
 	}
+
+	dmName := fmt.Sprintf("containerd-erofs-%s", id)
+	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
+	if _, err := os.Stat(devicePath); err == nil {
+		return devicePath, nil
+	}
 	fmt.Println("reading dmverity root hash")
 	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
 	if err != nil {
@@ -298,8 +304,6 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 		}
 	}
 
-	dmName := fmt.Sprintf("containerd-erofs-%s", id)
-	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err != nil {
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
@@ -308,7 +312,7 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 			return "", fmt.Errorf("failed to open dmverity device: %w", err)
 		}
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 50; i++ {
 			if _, err := os.Stat(devicePath); err == nil {
 				break
 			}
@@ -371,15 +375,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 					return nil, err
 				}
 			}
+			fmt.Println("formatting layer blob m: ", m)
 			if s.enableDmverity {
 				if err := s.formatLayerBlob(snap.ID); err != nil {
 					return nil, err
 				}
-				devicePath, err := s.runDmverity(snap.ID)
-				if err != nil {
-					return nil, err
-				}
-				m.Source = devicePath
 			}
 			// We have to force a loop device here since mount[] is static.
 			// However, if we're using dmverity, it's already a block device
@@ -420,12 +420,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		}
 		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		if s.enableDmverity {
-			devicePath, err := s.runDmverity(snap.ParentIDs[0])
-			if err != nil {
+			if err := s.formatLayerBlob(snap.ParentIDs[0]); err != nil {
 				return nil, err
 			}
-			m.Source = devicePath
 		}
+		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		// We have to force a loop device here too since mount[] is static.
 		// However, if we're using dmverity, it's already a block device
 		if !strings.HasPrefix(m.Source, "/dev/mapper/") {
@@ -441,10 +440,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		if err != nil {
 			return nil, err
 		}
-
+		fmt.Printf("active lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		// If the lowerdir is actually an EROFS committed layer but
 		// doesn't have an EROFS mount.  Let's recover now.
-		if mntpoint != m.Source && !isErofs(mntpoint) {
+		if !s.enableDmverity && mntpoint != m.Source && !isErofs(mntpoint) {
 			err := m.Mount(mntpoint)
 			// Use loop if the current kernel (6.12+) doesn't support file-backed mount
 			// Skip 'loop' if using dmverity device
@@ -462,6 +461,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				return nil, err
 			}
 			m.Source = devicePath
+			err = m.Mount(mntpoint)
+			// if err != nil {
+			// 	return nil, err
+			// }
 		}
 		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		lowerdirs = append(lowerdirs, mntpoint)
