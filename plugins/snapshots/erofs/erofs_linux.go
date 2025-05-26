@@ -249,6 +249,7 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
+	time.Sleep(10000 * time.Millisecond)
 	fmt.Println("dmverity enabled for layer:", id)
 	if !s.isLayerWithDmverity(id) {
 		fmt.Println("formatting dmverity")
@@ -462,9 +463,9 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			}
 			m.Source = devicePath
 			err = m.Mount(mntpoint)
-			// if err != nil {
-			// 	return nil, err
-			// }
+			if err != nil {
+				return nil, err
+			}
 		}
 		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		lowerdirs = append(lowerdirs, mntpoint)
