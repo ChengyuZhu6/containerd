@@ -161,3 +161,19 @@ func Close(name string) (string, error) {
 	}
 	return output, nil
 }
+
+func Status(name string) (*StatusInfo, error) {
+	args := []string{name}
+	output, err := actions(StatusCommand, args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dm-verity device status: %w, output: %s", err, output)
+	}
+
+	// Parse the output to extract structured information
+	info, err := ParseStatusOutput(output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse status output: %w", err)
+	}
+
+	return info, nil
+}

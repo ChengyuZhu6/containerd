@@ -211,9 +211,7 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 	if _, err := os.Stat(layerBlob); err != nil {
 		return fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
-	fmt.Println("dmverity enabled for layer:", id)
 	if !s.isLayerWithDmverity(id) {
-		fmt.Println("formatting dmverity")
 		opts := dmverity.DefaultDmverityOptions()
 		fileinfo, err := os.Stat(layerBlob)
 		if err != nil {
@@ -237,7 +235,6 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 			return fmt.Errorf("failed to format dmverity: %w", err)
 		}
 		dmverityData := fmt.Sprintf("%s|%d", info.RootHash, fileinfo.Size())
-		fmt.Println("dmverityData", dmverityData)
 		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
 			return fmt.Errorf("failed to write dmverity root hash: %w", err)
 		}
@@ -249,45 +246,24 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
-	time.Sleep(10000 * time.Millisecond)
-	fmt.Println("dmverity enabled for layer:", id)
-	if !s.isLayerWithDmverity(id) {
-		fmt.Println("formatting dmverity")
-		opts := dmverity.DefaultDmverityOptions()
-		fileinfo, err := os.Stat(layerBlob)
-		if err != nil {
-			return "", fmt.Errorf("failed to stat layer blob: %w", err)
-		}
-
-		// Open file for truncating
-		f, err := os.OpenFile(layerBlob, os.O_RDWR, 0644)
-		if err != nil {
-			return "", fmt.Errorf("failed to open layer blob for truncating: %w", err)
-		}
-		defer f.Close()
-		file_size := fileinfo.Size()
-		// Truncate the file to double its size
-		if err := f.Truncate(file_size * 2); err != nil {
-			return "", fmt.Errorf("failed to truncate layer blob: %w", err)
-		}
-		opts.HashOffset = uint64(file_size)
-		info, err := dmverity.Format(layerBlob, layerBlob, &opts)
-		if err != nil {
-			return "", fmt.Errorf("failed to format dmverity: %w", err)
-		}
-		dmverityData := fmt.Sprintf("%s|%d", info.RootHash, fileinfo.Size())
-		fmt.Println("dmverityData", dmverityData)
-		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
-			return "", fmt.Errorf("failed to write dmverity root hash: %w", err)
-		}
+	if err := s.formatLayerBlob(id); err != nil {
+		return "", err
 	}
 
 	dmName := fmt.Sprintf("containerd-erofs-%s", id)
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err == nil {
+		status, err := dmverity.Status(dmName)
+		fmt.Println("dmverity device status: ", status)
+		if err != nil {
+			return "", fmt.Errorf("failed to get dmverity device status: %w", err)
+		}
+		if !status.IsVerified() {
+			return "", fmt.Errorf("dmverity device %s is not verified, status: %s", dmName, status.Status)
+		}
+
 		return devicePath, nil
 	}
-	fmt.Println("reading dmverity root hash")
 	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
 	if err != nil {
 		return "", fmt.Errorf("failed to read dmverity root hash: %w", err)
@@ -297,7 +273,6 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	rootHash := parts[0]
 	var originalSize uint64
 	if len(parts) > 1 {
-		fmt.Println("original layer size:", parts[1])
 		var err error
 		originalSize, err = strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
@@ -362,7 +337,8 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	var options []string
 
-	fmt.Println("mounts called")
+	fmt.Println("mounts called, info :", info)
+	fmt.Println("snap: ", snap)
 	if len(snap.ParentIDs) == 0 {
 		fmt.Println("no parent ids")
 		m, mntpoint, err := s.lowerPath(snap.ID)
@@ -461,13 +437,22 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			if err != nil {
 				return nil, err
 			}
-			m.Source = devicePath
-			err = m.Mount(mntpoint)
-			if err != nil {
-				return nil, err
+			dmName := fmt.Sprintf("containerd-erofs-%s", snap.ParentIDs[i])
+			if _, err := os.Stat(devicePath); err == nil {
+				status, err := dmverity.Status(dmName)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get dmverity device status: %w", err)
+				}
+				m.Source = devicePath
+				if !status.IsInUse() {
+					err = m.Mount(mntpoint)
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
+
 		}
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		lowerdirs = append(lowerdirs, mntpoint)
 	}
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(lowerdirs, ":")))
@@ -635,6 +620,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 
 		if s.enableDmverity {
+			// err := s.formatLayerBlob(id)
 			_, err := s.runDmverity(id)
 			if err != nil {
 				return fmt.Errorf("failed to run dmverity: %w", err)
@@ -722,6 +708,7 @@ func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	var removals []string
 	var id string
+	fmt.Println("Remove called, key: ", key)
 	// Remove directories after the transaction is closed, failures must not
 	// return error since the transaction is committed with the removal
 	// key no longer available.
@@ -731,7 +718,6 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 				log.G(ctx).Warnf("failed to unmount EROFS mount for %v", id)
 			}
 
-			// Close dmverity device if it exists
 			if err := s.closeDmverityDevice(id); err != nil {
 				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
 			}
@@ -757,7 +743,7 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 		// The layer blob is only persisted for committed snapshots.
 		if k == snapshots.KindCommitted {
-			// Close dmverity device first if it exists
+			fmt.Println("closing dmverity device for ", id)
 			if err := s.closeDmverityDevice(id); err != nil {
 				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
 			}

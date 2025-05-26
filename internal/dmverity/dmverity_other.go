@@ -37,3 +37,7 @@ func Open(_ string, _ string, _ string, _ string, _ *DmverityOptions) (string, e
 func Close(_ string) (string, error) {
 	return "", errUnsupported
 }
+
+func Status(_ string) (*StatusInfo, error) {
+	return nil, errUnsupported
+}

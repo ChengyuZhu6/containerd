@@ -33,6 +33,8 @@ const (
 	OpenCommand VeritySetupCommand = "open"
 	// CloseCommand corresponds to "veritysetup close"
 	CloseCommand VeritySetupCommand = "close"
+	// StatusCommand corresponds to "veritysetup status"
+	StatusCommand VeritySetupCommand = "status"
 )
 
 // DmverityOptions contains configuration options for dm-verity operations
@@ -140,4 +142,69 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 	}
 
 	return info, scanner.Err()
+}
+
+// StatusInfo represents the parsed information from veritysetup status command output
+type StatusInfo struct {
+	// Device path
+	Device string
+	// Whether the device is active
+	IsActive bool
+	// Whether the device is in use
+	InUse bool
+	// Type of the device (e.g., "VERITY")
+	Type string
+	// Status of verification (e.g., "verified")
+	Status string
+}
+
+// ParseStatusOutput parses the output from veritysetup status command
+// and returns a structured representation of the information
+func ParseStatusOutput(output string) (*StatusInfo, error) {
+	info := &StatusInfo{}
+
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and command echo lines
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse the first line: "/dev/mapper/containerd-erofs-1 is active and is in use."
+		if strings.Contains(line, " is ") {
+			info.Device = strings.Fields(line)[0]
+			info.IsActive = strings.Contains(line, "active")
+			info.InUse = strings.Contains(line, "in use")
+			continue
+		}
+
+		// Parse key-value pairs
+		parts := strings.Split(line, ":")
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "type":
+			info.Type = value
+		case "status":
+			info.Status = value
+		}
+	}
+
+	return info, scanner.Err()
+}
+
+// IsVerified checks if the dm-verity device status is "verified"
+func (s *StatusInfo) IsVerified() bool {
+	return s.Status == "verified"
+}
+
+func (s *StatusInfo) IsInUse() bool {
+	return s.IsActive && s.InUse
 }
