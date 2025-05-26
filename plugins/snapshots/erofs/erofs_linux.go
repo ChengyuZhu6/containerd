@@ -375,6 +375,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				if err := s.formatLayerBlob(snap.ID); err != nil {
 					return nil, err
 				}
+				devicePath, err := s.runDmverity(snap.ID)
+				if err != nil {
+					return nil, err
+				}
+				m.Source = devicePath
 			}
 			// We have to force a loop device here since mount[] is static.
 			// However, if we're using dmverity, it's already a block device
