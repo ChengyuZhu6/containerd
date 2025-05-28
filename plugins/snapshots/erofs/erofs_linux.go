@@ -246,10 +246,6 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
-	if err := s.formatLayerBlob(id); err != nil {
-		return "", err
-	}
-
 	dmName := fmt.Sprintf("containerd-erofs-%s", id)
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err == nil {
@@ -281,6 +277,7 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	}
 
 	if _, err := os.Stat(devicePath); err != nil {
+		fmt.Println("openning dmverity")
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
 		_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
@@ -455,6 +452,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		}
 		lowerdirs = append(lowerdirs, mntpoint)
 	}
+	fmt.Println("lowerdirs: ", lowerdirs)
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(lowerdirs, ":")))
 	options = append(options, s.ovlOptions...)
 	fmt.Printf("options = %v\n", options)
@@ -620,17 +618,17 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 
 		if s.enableDmverity {
-			// err := s.formatLayerBlob(id)
-			_, err := s.runDmverity(id)
+			err := s.formatLayerBlob(id)
+			// _, err := s.runDmverity(id)
 			if err != nil {
 				return fmt.Errorf("failed to run dmverity: %w", err)
 			}
 		}
 
 		// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
-		if err := setImmutable(layerBlob, true); err != nil {
-			log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
-		}
+		// if err := setImmutable(layerBlob, true); err != nil {
+		// 	log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
+		// }
 		return nil
 	})
 
