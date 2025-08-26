@@ -89,6 +89,10 @@ command. As part of this process, we do the following:
 			Name:  "sync-fs",
 			Usage: "Synchronize the underlying filesystem containing files when unpack images, false by default",
 		},
+		&cli.BoolFlag{
+			Name:  "docker-style",
+			Usage: "Use docker-style progress display instead of hierarchical display",
+		},
 	),
 	Action: func(cliContext *cli.Context) error {
 		var (
@@ -172,7 +176,13 @@ command. As part of this process, we do the following:
 			}
 			is := image.NewStore(ref, sopts...)
 
-			pf, done := ProgressHandler(ctx, os.Stdout)
+			var pf transfer.ProgressFunc
+			var done func()
+			if cliContext.Bool("docker-style") {
+				pf, done = DockerProgressHandler(ctx, os.Stdout)
+			} else {
+				pf, done = ProgressHandler(ctx, os.Stdout)
+			}
 			defer done()
 
 			return client.Transfer(ctx, reg, is, transfer.WithProgress(pf))

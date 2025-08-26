@@ -80,6 +80,10 @@ Most of this is experimental and there are few leaps to make this work.`,
 			Name:  "metadata-only",
 			Usage: "Pull all metadata including manifests and configs",
 		},
+		&cli.BoolFlag{
+			Name:  "docker-style",
+			Usage: "Use docker-style progress display",
+		},
 	),
 	Action: func(cliContext *cli.Context) error {
 		var (
@@ -118,6 +122,8 @@ type FetchConfig struct {
 	RemoteOpts []containerd.RemoteOpt
 	// TraceHTTP writes DNS and connection information to the log when dealing with a container registry
 	TraceHTTP bool
+	// DockerStyle uses docker-style progress display
+	DockerStyle bool
 }
 
 // NewFetchConfig returns the default FetchConfig from cli flags
@@ -127,9 +133,10 @@ func NewFetchConfig(ctx context.Context, cliContext *cli.Context) (*FetchConfig,
 		return nil, err
 	}
 	config := &FetchConfig{
-		Resolver:  resolver,
-		Labels:    cliContext.StringSlice("label"),
-		TraceHTTP: cliContext.Bool("http-trace"),
+		Resolver:    resolver,
+		Labels:      cliContext.StringSlice("label"),
+		TraceHTTP:   cliContext.Bool("http-trace"),
+		DockerStyle: cliContext.Bool("docker-style"),
 	}
 	if !cliContext.Bool("debug") {
 		config.ProgressOutput = os.Stdout
@@ -172,7 +179,11 @@ func Fetch(ctx context.Context, client *containerd.Client, ref string, config *F
 	go func() {
 		if config.ProgressOutput != nil {
 			// no progress bar, because it hides some debug logs
-			ShowProgress(pctx, ongoing, client.ContentStore(), config.ProgressOutput)
+			if config.DockerStyle {
+				DockerShowProgress(pctx, ongoing, client.ContentStore(), config.ProgressOutput)
+			} else {
+				ShowProgress(pctx, ongoing, client.ContentStore(), config.ProgressOutput)
+			}
 		}
 		close(progress)
 	}()
