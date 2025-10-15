@@ -517,10 +517,15 @@ func (s *shimTask) delete(ctx context.Context, sandboxed bool, removeTask func(c
 }
 
 func (s *shimTask) Create(ctx context.Context, opts runtime.CreateOpts) (runtime.Task, error) {
+	log.G(ctx).Info("shimTask.Create started")
+
 	topts := opts.TaskOptions
 	if topts == nil || topts.GetValue() == nil {
 		topts = opts.RuntimeOptions
 	}
+
+	log.G(ctx).Info("building CreateTaskRequest")
+
 	request := &task.CreateTaskRequest{
 		ID:         s.ID(),
 		Bundle:     s.Bundle(),
@@ -540,10 +545,14 @@ func (s *shimTask) Create(ctx context.Context, opts runtime.CreateOpts) (runtime
 		})
 	}
 
+	log.G(ctx).Info("sending CreateTaskRequest to task service")
+
 	_, err := s.task.Create(ctx, request)
 	if err != nil {
 		return nil, errdefs.FromGRPC(err)
 	}
+
+	log.G(ctx).Info("CreateTaskRequest to task service completed successfully")
 
 	return s, nil
 }

@@ -139,6 +139,7 @@ func (s *service) View(ctx context.Context, pr *snapshotsapi.ViewSnapshotRequest
 
 func (s *service) Mounts(ctx context.Context, mr *snapshotsapi.MountsRequest) (*snapshotsapi.MountsResponse, error) {
 	log.G(ctx).WithFields(log.Fields{"key": mr.Key, "snapshotter": mr.Snapshotter}).Debugf("get snapshot mounts")
+
 	sn, err := s.getSnapshotter(mr.Snapshotter)
 	if err != nil {
 		return nil, err
@@ -148,6 +149,7 @@ func (s *service) Mounts(ctx context.Context, mr *snapshotsapi.MountsRequest) (*
 	if err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
+
 	return &snapshotsapi.MountsResponse{
 		Mounts: fromMounts(mounts),
 	}, nil

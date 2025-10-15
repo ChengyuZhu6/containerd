@@ -174,6 +174,7 @@ type local struct {
 }
 
 func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.CallOption) (*api.CreateTaskResponse, error) {
+	log.G(ctx).WithField("container_id", r.ContainerID).Info("creating task")
 	container, err := l.getContainer(ctx, r.ContainerID)
 	if err != nil {
 		return nil, errdefs.ToGRPC(err)
@@ -232,10 +233,12 @@ func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.
 		})
 	}
 	l.emitRuntimeWarning(ctx, container.Runtime.Name)
+	log.G(ctx).WithField("container_id", r.ContainerID).Info("getting runtime")
 	rtime, err := l.getRuntime(container.Runtime.Name)
 	if err != nil {
 		return nil, err
 	}
+	log.G(ctx).WithField("container_id", r.ContainerID).Info("getting task")
 	_, err = rtime.Get(ctx, r.ContainerID)
 	if err != nil && !errdefs.IsNotFound(err) {
 		return nil, errdefs.ToGRPC(err)
@@ -243,6 +246,7 @@ func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.
 	if err == nil {
 		return nil, errdefs.ToGRPC(fmt.Errorf("task %s: %w", r.ContainerID, errdefs.ErrAlreadyExists))
 	}
+	log.G(ctx).WithField("container_id", r.ContainerID).Info("creating task")
 	c, err := rtime.Create(ctx, r.ContainerID, opts)
 	if err != nil {
 		return nil, errdefs.ToGRPC(err)

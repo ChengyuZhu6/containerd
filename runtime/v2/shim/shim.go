@@ -397,9 +397,9 @@ func run(ctx context.Context, manager Manager, initFunc Init, name string, confi
 		ttrpcUnaryInterceptors = []ttrpc.UnaryServerInterceptor{}
 	)
 	plugins := plugin.Graph(func(*plugin.Registration) bool { return false })
+	log.G(ctx).WithField("plugin_count", len(plugins)).Info("shim: starting plugin loading process")
 	for _, p := range plugins {
 		id := p.URI()
-		log.G(ctx).WithField("type", p.Type).Debugf("loading plugin %q...", id)
 
 		initContext := plugin.NewContext(
 			ctx,
@@ -449,6 +449,8 @@ func run(ctx context.Context, manager Manager, initFunc Init, name string, confi
 			ttrpcUnaryInterceptors = append(ttrpcUnaryInterceptors, src.UnaryInterceptor())
 		}
 	}
+
+	log.G(ctx).WithField("loaded_services", len(ttrpcServices)).Info("shim: plugin loading completed")
 
 	if len(ttrpcServices) == 0 {
 		return fmt.Errorf("required that ttrpc service")

@@ -113,7 +113,17 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 			log.G(ctx).WithError(err).Error("copy shim log")
 		}
 	}()
+
+	log.G(ctx).WithFields(log.Fields{
+		"bundle_id": b.bundle.ID,
+		"runtime":   b.runtime,
+		"args":      args,
+	}).Info("binary.Start: executing shim command")
+
 	out, err := cmd.CombinedOutput()
+
+	log.G(ctx).Info("binary.Start: shim command execution completed")
+
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", out, err)
 	}

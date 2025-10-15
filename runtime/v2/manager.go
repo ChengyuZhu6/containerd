@@ -245,6 +245,12 @@ func (m *ShimManager) Start(ctx context.Context, id string, opts runtime.CreateO
 }
 
 func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, opts runtime.CreateOpts) (*shim, error) {
+	log.G(ctx).WithFields(log.Fields{
+		"task_id":     id,
+		"bundle_path": bundle.Path,
+		"runtime":     opts.Runtime,
+	}).Info("startShim: beginning shim startup process")
+
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
 		return nil, err
@@ -280,6 +286,8 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 	if err != nil {
 		return nil, fmt.Errorf("start failed: %w", err)
 	}
+
+	log.G(ctx).Info("startShim: shim process started successfully")
 
 	return shim, nil
 }
@@ -419,6 +427,8 @@ func (m *TaskManager) ID() string {
 
 // Create launches new shim instance and creates new task
 func (m *TaskManager) Create(ctx context.Context, taskID string, opts runtime.CreateOpts) (runtime.Task, error) {
+	log.G(ctx).Info("starting task manager create")
+
 	shim, err := m.manager.Start(ctx, taskID, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start shim: %w", err)
@@ -426,11 +436,13 @@ func (m *TaskManager) Create(ctx context.Context, taskID string, opts runtime.Cr
 
 	// Cast to shim task and call task service to create a new container task instance.
 	// This will not be required once shim service / client implemented.
+	log.G(ctx).WithField("task_id", taskID).Debug("creating shim task wrapper")
 	shimTask, err := newShimTask(shim)
 	if err != nil {
 		return nil, err
 	}
 
+	log.G(ctx).WithField("task_id", taskID).Debug("calling shim task create")
 	t, err := shimTask.Create(ctx, opts)
 	if err != nil {
 		// NOTE: ctx contains required namespace information.

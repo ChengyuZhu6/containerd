@@ -247,10 +247,12 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (_ snapshots.Usage,
 }
 
 func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).WithField("key", key).Info("overlay snapshotter: preparing snapshot")
 	return o.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
 }
 
 func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).WithField("key", key).Info("overlay snapshotter: viewing snapshot")
 	return o.createSnapshot(ctx, snapshots.KindView, key, parent, opts)
 }
 
@@ -259,6 +261,8 @@ func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 //
 // This can be used to recover mounts after calling View or Prepare.
 func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, err error) {
+	log.G(ctx).WithField("key", key).Debug("overlay snapshotter: getting mounts for snapshot")
+
 	var s storage.Snapshot
 	if err := o.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		s, err = storage.GetSnapshot(ctx, key)
