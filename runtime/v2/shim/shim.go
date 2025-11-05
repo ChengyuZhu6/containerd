@@ -364,6 +364,40 @@ func run(ctx context.Context, manager Manager, initFunc Init, name string, confi
 			return err
 		}
 		return nil
+	case "warmstart":
+		// Warm start mode: start shim but don't bind to specific container yet
+		// Need to setup logger BEFORE any logging to avoid stdout pollution
+		if !config.NoSetupLogger {
+			ctx, err = setLogger(ctx, id)
+			if err != nil {
+				return err
+			}
+		}
+
+		opts := StartOpts{
+			Address:      addressFlag,
+			TTRPCAddress: ttrpcAddress,
+			Debug:        debugFlag,
+		}
+
+		log.G(ctx).WithFields(log.Fields{
+			"warm_id":   id,
+			"namespace": namespaceFlag,
+		}).Info("starting shim in warm mode")
+
+		address, err := manager.Start(ctx, id, opts)
+		if err != nil {
+			return err
+		}
+
+		log.G(ctx).WithField("address", address).Info("warm shim started successfully")
+
+		// IMPORTANT: Write address to stdout AFTER all logging is done
+		// This must be the ONLY thing written to stdout
+		if _, err := os.Stdout.WriteString(address); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if !config.NoSetupLogger {

@@ -124,16 +124,23 @@ func (manager) Start(ctx context.Context, id string, opts shim.StartOpts) (_ str
 		return "", err
 	}
 	grouping := id
+	
+	// Try to read spec; if it doesn't exist, we're in warm mode
 	spec, err := readSpec()
-	if err != nil {
+	if err == nil {
+		// Normal mode: use spec annotations for grouping
+		for _, group := range groupLabels {
+			if groupID, ok := spec.Annotations[group]; ok {
+				grouping = groupID
+				break
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		// Real error (not just missing file)
 		return "", err
 	}
-	for _, group := range groupLabels {
-		if groupID, ok := spec.Annotations[group]; ok {
-			grouping = groupID
-			break
-		}
-	}
+	// else: warm mode, use id as grouping
+	
 	address, err := shim.SocketAddress(ctx, opts.Address, grouping)
 	if err != nil {
 		return "", err

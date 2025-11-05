@@ -155,6 +155,100 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 	}, nil
 }
 
+// StartWarm starts a shim in warm mode (pre-started but not bound to container)
+func (b *binary) StartWarm(ctx context.Context, onClose func()) (_ *shim, err error) {
+	args := []string{"-id", b.bundle.ID}
+	switch log.GetLevel() {
+	case log.DebugLevel, log.TraceLevel:
+		args = append(args, "-debug")
+	}
+	args = append(args, "warmstart")
+
+	cmd, err := client.Command(
+		ctx,
+		&client.CommandConfig{
+			Runtime:      b.runtime,
+			Address:      b.containerdAddress,
+			TTRPCAddress: b.containerdTTRPCAddress,
+			Path:         b.bundle.Path,
+			Opts:         nil, // No runtime options for warm start
+			Args:         args,
+			SchedCore:    b.schedCore,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	// Windows needs a namespace when openShimLog
+	ns, _ := namespaces.Namespace(ctx)
+	shimCtx, cancelShimLog := context.WithCancel(namespaces.WithNamespace(context.Background(), ns))
+	defer func() {
+		if err != nil {
+			cancelShimLog()
+		}
+	}()
+	f, err := openShimLog(shimCtx, b.bundle, client.AnonDialer)
+	if err != nil {
+		return nil, fmt.Errorf("open warm shim log pipe: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			f.Close()
+		}
+	}()
+
+	// copy the shim's logs to containerd's output
+	go func() {
+		defer f.Close()
+		_, err := io.Copy(os.Stderr, f)
+		err = checkCopyShimLogError(ctx, err)
+		if err != nil {
+			log.G(ctx).WithError(err).Error("copy warm shim log")
+		}
+	}()
+
+	log.G(ctx).WithFields(log.Fields{
+		"warm_id": b.bundle.ID,
+		"runtime": b.runtime,
+		"args":    args,
+	}).Info("binary.StartWarm: executing warm shim command")
+
+	out, err := cmd.CombinedOutput()
+
+	log.G(ctx).Info("binary.StartWarm: warm shim command execution completed")
+
+	if err != nil {
+		return nil, fmt.Errorf("warm start failed: %s: %w", out, err)
+	}
+	response := bytes.TrimSpace(out)
+
+	onCloseWithShimLog := func() {
+		onClose()
+		cancelShimLog()
+		f.Close()
+	}
+
+	// Save runtime binary path
+	if err := os.WriteFile(filepath.Join(b.bundle.Path, "shim-binary-path"), []byte(b.runtime), 0600); err != nil {
+		return nil, err
+	}
+
+	params, err := parseStartResponse(ctx, response)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := makeConnection(ctx, params, onCloseWithShimLog)
+	if err != nil {
+		return nil, err
+	}
+
+	return &shim{
+		bundle: b.bundle,
+		client: conn,
+	}, nil
+}
+
 func (b *binary) Delete(ctx context.Context) (*runtime.Exit, error) {
 	log.G(ctx).Info("cleaning up dead shim")
 
