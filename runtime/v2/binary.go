@@ -212,6 +212,21 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 		return nil, err
 	}
 
+	// If we prewarmed and the shim supports Adopt, bind container context before returning.
+	// Use namespace from ctx; ID/Bundle来自当前bundle。
+	if os.Getenv("CONTAINERD_SHIM_PREWARM") == "1" && params.Version >= 3 {
+		ns, _ := namespaces.Namespace(ctx)
+		adoptErr := client.AdoptContainer(ctx, conn, &client.AdoptRequest{
+			Id:        b.bundle.ID,
+			Bundle:    b.bundle.Path,
+			Namespace: ns,
+		})
+		if adoptErr != nil {
+			// 兼容处理：若 shim 未实现或返回错误，记录并继续旧路径
+			log.G(ctx).WithError(adoptErr).Warn("AdoptContainer failed; continuing without adopt")
+		}
+	}
+
 	return &shim{
 		bundle: b.bundle,
 		client: conn,

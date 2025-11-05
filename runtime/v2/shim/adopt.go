@@ -2,10 +2,11 @@ package shim
 
 import (
 	"context"
-	"errors"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/ttrpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -24,11 +25,18 @@ func AdoptContainer(ctx context.Context, conn interface{}, req *AdoptRequest) er
 	if !ok || cli == nil {
 		return errdefs.ErrNotImplemented
 	}
-	// 建立 ttrpc 通用调用，使用空请求，返回 emptypb.Empty
+	// 通过 ttrpc metadata 传递容器上下文字段，避免生成 proto
+	mdMD := ttrpc.MD{
+		"adopt.id":        []string{req.Id},
+		"adopt.bundle":    []string{req.Bundle},
+		"adopt.namespace": []string{req.Namespace},
+	}
+	ctx = ttrpc.WithMetadata(ctx, mdMD)
+
+	// 建立 ttrpc 调用，使用空请求，返回 emptypb.Empty
 	var resp emptypb.Empty
 	if err := cli.Call(ctx, "containerd.task.v2.Task", "AdoptContainer", &emptypb.Empty{}, &resp); err != nil {
-		var ttErr *ttrpc.Error
-		if errors.As(err, &ttErr) && ttErr.Code() == ttrpc.Unimplemented {
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Unimplemented {
 			return errdefs.ErrNotImplemented
 		}
 		return err

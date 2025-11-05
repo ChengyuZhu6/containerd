@@ -24,7 +24,16 @@ func RegisterAdoptHandler(server *ttrpc.Server) {
 				if err := unmarshal(&req); err != nil {
 					return nil, err
 				}
-				// 返回空响应，表示 adopt 成功；后续可将上下文绑定至 shim 内部状态
+				// 从 ttrpc metadata 读取容器上下文并记录（占位实现）
+				md, _ := ttrpc.GetMetadata(ctx)
+				// 将绑定信息写入日志；后续可存入 shim 内部状态供 Create 使用
+				id := md["adopt.id"]
+				bundle := md["adopt.bundle"]
+				ns := md["adopt.namespace"]
+				_ = id
+				_ = bundle
+				_ = ns
+				// 返回空响应，表示 adopt 成功
 				return &emptypb.Empty{}, nil
 			},
 		},

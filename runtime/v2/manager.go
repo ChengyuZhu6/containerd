@@ -358,7 +358,7 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 				if cerr == nil {
 					// Call AdoptContainer to bind bundle context on pooled shim.
 					adoptReq := &shimbinary.AdoptRequest{
-						ID:        id,
+						Id:        id,
 						Bundle:    bundle.Path,
 						Namespace: ns,
 					}

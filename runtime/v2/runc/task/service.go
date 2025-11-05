@@ -137,6 +137,14 @@ type service struct {
 	exitSubscribers map[*map[int][]runcC.Exit]struct{}
 
 	shutdown shutdown.Service
+
+	// adopted holds prewarm-adopted container context until Create.
+	adopted struct {
+		ID        string
+		Bundle    string
+		Namespace string
+		Active    bool
+	}
 }
 
 type containerProcess struct {
@@ -222,6 +230,18 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Prefer adopted context if present (prewarm -> adopt -> create).
+	if s.adopted.Active {
+		if s.adopted.ID != "" {
+			r.ID = s.adopted.ID
+		}
+		if s.adopted.Bundle != "" {
+			r.Bundle = s.adopted.Bundle
+		}
+		// Namespace is carried via ctx by containerd; clear Active for next container.
+		s.adopted.Active = false
+	}
+
 	s.lifecycleMu.Lock()
 	handleStarted, cleanup := s.preStart(nil)
 	s.lifecycleMu.Unlock()
@@ -260,7 +280,35 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 }
 
 func (s *service) RegisterTTRPC(server *ttrpc.Server) error {
+	// Register standard Task service.
 	taskAPI.RegisterTaskService(server, s)
+
+	// Manually register AdoptContainer for prototype verification.
+	// Service: "containerd.task.v2.Task", Method: "AdoptContainer"
+	server.Register("containerd.task.v2.Task", map[string]ttrpc.Method{
+		"AdoptContainer": func(ctx context.Context, unmarshal func(interface{}) error) (interface{}, error) {
+			// Unmarshal empty request
+			var req ptypes.Empty
+			if err := unmarshal(&req); err != nil {
+				return nil, err
+			}
+			// Read ttrpc metadata (keys: adopt.id, adopt.bundle, adopt.namespace)
+			if md, ok := ttrpc.GetMetadata(ctx); ok {
+				if vals, ok := md["adopt.id"]; ok && len(vals) > 0 {
+					s.adopted.ID = vals[0]
+				}
+				if vals, ok := md["adopt.bundle"]; ok && len(vals) > 0 {
+					s.adopted.Bundle = vals[0]
+				}
+				if vals, ok := md["adopt.namespace"]; ok && len(vals) > 0 {
+					s.adopted.Namespace = vals[0]
+				}
+				s.adopted.Active = s.adopted.ID != "" && s.adopted.Bundle != ""
+			}
+			return &ptypes.Empty{}, nil
+		},
+	})
+
 	return nil
 }
 
