@@ -17,6 +17,7 @@
 package v2
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -267,7 +268,60 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 
 	// Try to reuse a prewarmed shim from pool when enabled.
 	if m.pool != nil {
-		if item := m.pool.GetIdle(ctx, ns, opts.Runtime); item != nil {
+		// If no idle item available, proactively prewarm one and register into the pool.
+		item := m.pool.GetIdle(ctx, ns, opts.Runtime)
+		if item == nil {
+			// Resolve runtime path for prewarm
+			runtimePath, rerr := m.resolveRuntimePath(opts.Runtime)
+			if rerr != nil {
+				log.G(ctx).WithError(rerr).Warn("failed to resolve runtime for prewarm, skipping pool prewarm")
+			} else {
+				// Build a prewarm command similar to binary.Start but without bundle binding.
+				args := []string{"-id", id}
+				switch log.GetLevel() {
+				case log.DebugLevel, log.TraceLevel:
+					args = append(args, "-debug")
+				}
+				args = append(args, "prewarm")
+
+				cmd, cerr := shimbinary.Command(
+					ctx,
+					&shimbinary.CommandConfig{
+						Runtime:      runtimePath,
+						Address:      m.containerdAddress,
+						TTRPCAddress: m.containerdTTRPCAddress,
+						Path:         "", // no bundle binding
+						Opts:         protobuf.FromAny(opts.TaskOptions),
+						Args:         args,
+						SchedCore:    m.schedCore,
+					})
+				if cerr != nil {
+					log.G(ctx).WithError(cerr).Warn("failed to create prewarm command")
+				} else {
+					out, runcErr := cmd.CombinedOutput()
+					if runcErr != nil {
+						log.G(ctx).WithError(runcErr).Warnf("prewarm command failed: %s", string(out))
+					} else {
+						resp := bytes.TrimSpace(out)
+						params, perr := parseStartResponse(ctx, resp)
+						if perr != nil {
+							log.G(ctx).WithError(perr).Warn("failed to parse prewarm response")
+						} else {
+							// Register into pool using parsed address and process pid if available.
+							pid := 0
+							if cmd.Process != nil {
+								pid = cmd.Process.Pid
+							}
+							m.pool.Register(ctx, ns, opts.Runtime, params.Address, pid)
+							// Fetch newly registered item for reuse
+							item = m.pool.GetIdle(ctx, ns, opts.Runtime)
+						}
+					}
+				}
+			}
+		}
+
+		if item != nil {
 			onClose := func() {
 				log.G(ctx).WithField("id", id).Info("pooled shim disconnected")
 				m.shims.Delete(ctx, id)
