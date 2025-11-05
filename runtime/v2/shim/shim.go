@@ -485,6 +485,8 @@ func run(ctx context.Context, manager Manager, initFunc Init, name string, confi
 			return fmt.Errorf("failed to register service: %w", err)
 		}
 	}
+	// Register AdoptContainer handler (placeholder)
+	RegisterAdoptHandler(server)
 
 	if err := serve(ctx, server, signals, sd.Shutdown); err != nil {
 		if err != shutdown.ErrShutdown {
