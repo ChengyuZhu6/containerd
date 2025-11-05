@@ -49,6 +49,8 @@ type Config struct {
 	Platforms []string `toml:"platforms"`
 	// SchedCore enabled linux core scheduling
 	SchedCore bool `toml:"sched_core"`
+	// WarmPool configuration for warm shim pooling
+	WarmPool WarmPoolConfig `toml:"warm_pool"`
 }
 
 func init() {
@@ -92,6 +94,7 @@ func init() {
 				Store:        cs,
 				SchedCore:    config.SchedCore,
 				SandboxStore: ss,
+				WarmPool:     config.WarmPool,
 			})
 			if err != nil {
 				return nil, err
@@ -129,6 +132,7 @@ type ManagerConfig struct {
 	TTRPCAddress string
 	SchedCore    bool
 	SandboxStore sandbox.Store
+	WarmPool     WarmPoolConfig
 }
 
 // NewShimManager creates a manager for v2 shims
@@ -149,10 +153,16 @@ func NewShimManager(ctx context.Context, config *ManagerConfig) (*ShimManager, e
 		containers:             config.Store,
 		schedCore:              config.SchedCore,
 		sandboxStore:           config.SandboxStore,
+		warmPoolCfg:            config.WarmPool,
 	}
 
 	if err := m.loadExistingTasks(ctx); err != nil {
 		return nil, err
+	}
+
+	// Initialize warm pools if enabled
+	if m.warmPoolCfg.Enabled {
+		log.G(ctx).Info("warm shim pool enabled")
 	}
 
 	return m, nil
@@ -174,6 +184,9 @@ type ShimManager struct {
 	// runtimePaths is a cache of `runtime names` -> `resolved fs path`
 	runtimePaths sync.Map
 	sandboxStore sandbox.Store
+	// warmPools maintains warm shim pools per namespace+runtime
+	warmPools   sync.Map // key: "namespace/runtime" -> *warmPool
+	warmPoolCfg WarmPoolConfig
 }
 
 // ID of the shim manager
@@ -227,6 +240,25 @@ func (m *ShimManager) Start(ctx context.Context, id string, opts runtime.CreateO
 		return shim, nil
 	}
 
+	// Try to get a warm shim from pool first
+	if pool := m.getWarmPool(ctx, opts.Runtime); pool != nil {
+		warmShim := pool.Take(ctx)
+		if warmShim != nil {
+			log.G(ctx).WithField("id", id).Info("using warm shim from pool")
+			if err := warmShim.Bind(ctx, id, opts); err != nil {
+				log.G(ctx).WithError(err).Warn("failed to bind warm shim, falling back to cold start")
+				warmShim.Close()
+			} else {
+				if err := m.shims.Add(ctx, warmShim); err != nil {
+					warmShim.Close()
+					return nil, fmt.Errorf("failed to add warm shim: %w", err)
+				}
+				return warmShim, nil
+			}
+		}
+	}
+
+	// Fallback to cold path
 	shim, err := m.startShim(ctx, bundle, id, opts)
 	if err != nil {
 		return nil, err
@@ -394,6 +426,58 @@ func (m *ShimManager) Delete(ctx context.Context, id string) error {
 	m.shims.Delete(ctx, id)
 
 	return err
+}
+
+// getWarmPool retrieves or creates a warm pool for the given runtime
+func (m *ShimManager) getWarmPool(ctx context.Context, runtimeName string) *warmPool {
+	if !m.warmPoolCfg.Enabled {
+		return nil
+	}
+
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return nil
+	}
+
+	poolKey := fmt.Sprintf("%s/%s", ns, runtimeName)
+
+	if pool, ok := m.warmPools.Load(poolKey); ok {
+		return pool.(*warmPool)
+	}
+
+	// Create new pool
+	pool := newWarmPool(ctx, m, runtimeName, ns, m.warmPoolCfg)
+
+	// Start the pool with pre-warmed shims
+	if err := pool.Start(ctx); err != nil {
+		log.G(ctx).WithError(err).Warn("failed to start warm pool")
+		return nil
+	}
+
+	// Store it
+	actual, loaded := m.warmPools.LoadOrStore(poolKey, pool)
+	if loaded {
+		// Another goroutine created it first, close ours
+		pool.Close()
+		return actual.(*warmPool)
+	}
+
+	log.G(ctx).WithFields(log.Fields{
+		"namespace": ns,
+		"runtime":   runtimeName,
+	}).Info("created warm pool")
+
+	return pool
+}
+
+// CloseWarmPools closes all warm pools
+func (m *ShimManager) CloseWarmPools() {
+	m.warmPools.Range(func(key, value interface{}) bool {
+		if pool, ok := value.(*warmPool); ok {
+			pool.Close()
+		}
+		return true
+	})
 }
 
 func parsePlatforms(platformStr []string) ([]ocispec.Platform, error) {

@@ -1,0 +1,94 @@
+# Warm Shim Configuration Example
+# 
+# This file shows how to configure the Warm Shim feature in containerd.
+# Copy the relevant sections to your main containerd config.toml file.
+
+version = 2
+
+# Root directory for containerd metadata
+root = "/var/lib/containerd"
+
+# State directory for runtime bundle paths
+state = "/run/containerd"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+
+# Runtime V2 Configuration with Warm Pool
+[plugins."io.containerd.runtime.v2.task"]
+  # Platforms this runtime supports
+  platforms = ["linux/amd64"]
+  
+  # Enable Linux core scheduling
+  sched_core = false
+  
+  # Warm Shim Pool Configuration
+  [plugins."io.containerd.runtime.v2.task".warm_pool]
+    # Enable or disable warm shim pooling
+    # Default: false
+    enabled = true
+    
+    # Number of warm shims to maintain per namespace+runtime combination
+    # Recommended values:
+    #   - Low frequency container creation: 1-2
+    #   - Medium frequency: 2-5
+    #   - High frequency: 5-10
+    # Default: 2
+    size = 2
+    
+    # Timeout for taking a warm shim from the pool
+    # If no warm shim is available within this time, fallback to cold start
+    # Format: duration string (e.g., "100ms", "1s")
+    # Default: 100ms
+    take_timeout = "100ms"
+
+# Example: Different configurations for different workload types
+
+# === Configuration for Development Environment ===
+# Low container creation frequency, minimal resource overhead
+# [plugins."io.containerd.runtime.v2.task".warm_pool]
+#   enabled = true
+#   size = 1
+#   take_timeout = "50ms"
+
+# === Configuration for Production Environment ===
+# Medium to high container creation frequency
+# [plugins."io.containerd.runtime.v2.task".warm_pool]
+#   enabled = true
+#   size = 5
+#   take_timeout = "200ms"
+
+# === Configuration for CI/CD Environment ===
+# Very high container creation frequency, burst traffic
+# [plugins."io.containerd.runtime.v2.task".warm_pool]
+#   enabled = true
+#   size = 10
+#   take_timeout = "500ms"
+
+# === Configuration with Warm Pool Disabled ===
+# Use traditional cold start for all containers
+# [plugins."io.containerd.runtime.v2.task".warm_pool]
+#   enabled = false
+
+[plugins."io.containerd.grpc.v1.cri"]
+  # CRI plugin configuration
+  sandbox_image = "registry.k8s.io/pause:3.8"
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  # Default runtime for CRI
+  default_runtime_name = "runc"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+    
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      # Runtime options can be specified here
+      SystemdCgroup = true
+
+# Notes:
+# 1. Warm pools are created per namespace + runtime combination
+# 2. Each namespace with enabled warm pool will maintain its own set of warm shims
+# 3. Memory usage: approximately 5-10MB per warm shim
+# 4. Warm shims are automatically replenished when taken from the pool
+# 5. Failed warm shim operations automatically fallback to cold start
+
