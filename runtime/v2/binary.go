@@ -92,13 +92,19 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 	runShim := func(action string) (response []byte, runErr error) {
 		args := buildArgs(action)
 
+		// Prewarm should not bind to bundle-specific working dir.
+		var workPath string
+		if action != "prewarm" {
+			workPath = b.bundle.Path
+		}
+
 		cmd, err := client.Command(
 			ctx,
 			&client.CommandConfig{
 				Runtime:      b.runtime,
 				Address:      b.containerdAddress,
 				TTRPCAddress: b.containerdTTRPCAddress,
-				Path:         b.bundle.Path,
+				Path:         workPath,
 				Opts:         opts,
 				Args:         args,
 				SchedCore:    b.schedCore,
@@ -110,6 +116,7 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 			"bundle_id": b.bundle.ID,
 			"runtime":   b.runtime,
 			"args":      args,
+			"path":      workPath,
 		}).Info("binary.Start: executing shim command")
 
 		out, err := cmd.CombinedOutput()
@@ -173,9 +180,12 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 		cancelShimLog()
 		f.Close()
 	}
-	// Save runtime binary path for restore.
-	if err := os.WriteFile(filepath.Join(b.bundle.Path, "shim-binary-path"), []byte(b.runtime), 0600); err != nil {
-		return nil, err
+	// Save runtime binary path for restore only when we are binding bundle (start path).
+	// Prewarm should not write into bundle.
+	if !prewarmEnabled || response == nil {
+		if err := os.WriteFile(filepath.Join(b.bundle.Path, "shim-binary-path"), []byte(b.runtime), 0600); err != nil {
+			return nil, err
+		}
 	}
 
 	params, err := parseStartResponse(ctx, response)

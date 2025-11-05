@@ -364,6 +364,24 @@ func run(ctx context.Context, manager Manager, initFunc Init, name string, confi
 			return err
 		}
 		return nil
+	case "prewarm":
+		// Prewarm performs the same initialization/startup as "start",
+		// but is intended for bootstrapping the shim server ahead of container adoption.
+		opts := StartOpts{
+			Address:      addressFlag,
+			TTRPCAddress: ttrpcAddress,
+			Debug:        debugFlag,
+		}
+
+		response, err := manager.Start(ctx, id, opts)
+		if err != nil {
+			return err
+		}
+		// runc manager returns either plain address or BootstrapParams v3 JSON
+		if _, err := os.Stdout.WriteString(response); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if !config.NoSetupLogger {

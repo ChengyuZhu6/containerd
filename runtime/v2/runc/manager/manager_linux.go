@@ -169,8 +169,11 @@ func (manager) Start(ctx context.Context, id string, opts shim.StartOpts) (_ str
 	}()
 
 	// make sure that reexec shim-v2 binary use the value if need
-	if err := shim.WriteAddress("address", address); err != nil {
-		return "", err
+	// In prewarm mode, avoid writing bundle-specific address file to keep resource isolation.
+	if os.Getenv("CONTAINERD_SHIM_PREWARM") != "1" {
+		if err := shim.WriteAddress("address", address); err != nil {
+			return "", err
+		}
 	}
 
 	f, err := socket.File()
@@ -226,6 +229,21 @@ func (manager) Start(ctx context.Context, id string, opts shim.StartOpts) (_ str
 
 	if err := shim.AdjustOOMScore(cmd.Process.Pid); err != nil {
 		return "", fmt.Errorf("failed to adjust OOM score for shim: %w", err)
+	}
+	// Prewarm support: when enabled, return BootstrapParams v3 JSON for containerd to parse.
+	// Otherwise, keep returning plain address for backward compatibility.
+	if os.Getenv("CONTAINERD_SHIM_PREWARM") == "1" {
+		params := map[string]any{
+			"version":  3,
+			"address":  address,
+			"protocol": "ttrpc",
+		}
+		b, jerr := json.Marshal(params)
+		if jerr == nil {
+			return string(b), nil
+		}
+		// If JSON marshal fails, fall back to plain address
+		log.G(ctx).WithError(jerr).Warn("failed to marshal BootstrapParams v3, falling back to plain address")
 	}
 	return address, nil
 }
