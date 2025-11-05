@@ -181,3 +181,11 @@ func (p *ShimPool) Len() int {
 	defer p.mu.Unlock()
 	return len(p.index)
 }
+
+// Count returns the number of tracked shims for a namespace/runtime pair.
+func (p *ShimPool) Count(ns, runtime string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k := p.key(ns, runtime)
+	return len(p.items[k])
+}

@@ -31,6 +31,8 @@ import (
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"strconv"
+
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
@@ -369,6 +371,62 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 						"pid":     item.PID,
 					}).Info("startShim: reused prewarmed shim from pool")
 
+					// Async fill pool capacity after reuse
+					if m.pool != nil {
+						go func(ctx context.Context, ns, runtime string) {
+							capStr := os.Getenv("CONTAINERD_SHIM_PREWARM_CAPACITY")
+							capacity := 1
+							if capStr != "" {
+								if v, err := strconv.Atoi(capStr); err == nil && v > 0 {
+									capacity = v
+								}
+							}
+							for m.pool.Count(ns, runtime) < capacity {
+								// Prewarm one and register
+								rp, rerr := m.resolveRuntimePath(runtime)
+								if rerr != nil {
+									log.G(ctx).WithError(rerr).Warn("prewarm fill: resolve runtime failed")
+									break
+								}
+								args := []string{"-id", id}
+								switch log.GetLevel() {
+								case log.DebugLevel, log.TraceLevel:
+									args = append(args, "-debug")
+								}
+								args = append(args, "prewarm")
+								cmd, cerr := shimbinary.Command(ctx, &shimbinary.CommandConfig{
+									Runtime:      rp,
+									Address:      m.containerdAddress,
+									TTRPCAddress: m.containerdTTRPCAddress,
+									Path:         "",
+									Opts:         protobuf.FromAny(opts.TaskOptions),
+									Args:         args,
+									SchedCore:    m.schedCore,
+								})
+								if cerr != nil {
+									log.G(ctx).WithError(cerr).Warn("prewarm fill: create command failed")
+									break
+								}
+								out, runcErr := cmd.CombinedOutput()
+								if runcErr != nil {
+									log.G(ctx).WithError(runcErr).Warnf("prewarm fill: command failed: %s", string(out))
+									break
+								}
+								resp := bytes.TrimSpace(out)
+								params, perr := parseStartResponse(ctx, resp)
+								if perr != nil {
+									log.G(ctx).WithError(perr).Warn("prewarm fill: parse response failed")
+									break
+								}
+								pid := 0
+								if cmd.Process != nil {
+									pid = cmd.Process.Pid
+								}
+								m.pool.Register(ctx, ns, runtime, params.Address, pid)
+							}
+						}(ctx, ns, opts.Runtime)
+					}
+
 					return pshim, nil
 				}
 				log.G(ctx).WithError(cerr).Warn("failed to connect to pooled shim, removing from pool and falling back")
@@ -408,6 +466,61 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 	}
 
 	log.G(ctx).Info("startShim: shim process started successfully")
+
+	// Async fill pool capacity after starting a new shim
+	if m.pool != nil {
+		go func(ctx context.Context, ns, runtime string) {
+			capStr := os.Getenv("CONTAINERD_SHIM_PREWARM_CAPACITY")
+			capacity := 1
+			if capStr != "" {
+				if v, err := strconv.Atoi(capStr); err == nil && v > 0 {
+					capacity = v
+				}
+			}
+			for m.pool.Count(ns, runtime) < capacity {
+				rp, rerr := m.resolveRuntimePath(runtime)
+				if rerr != nil {
+					log.G(ctx).WithError(rerr).Warn("prewarm fill: resolve runtime failed")
+					break
+				}
+				args := []string{"-id", id}
+				switch log.GetLevel() {
+				case log.DebugLevel, log.TraceLevel:
+					args = append(args, "-debug")
+				}
+				args = append(args, "prewarm")
+				cmd, cerr := shimbinary.Command(ctx, &shimbinary.CommandConfig{
+					Runtime:      rp,
+					Address:      m.containerdAddress,
+					TTRPCAddress: m.containerdTTRPCAddress,
+					Path:         "",
+					Opts:         protobuf.FromAny(opts.TaskOptions),
+					Args:         args,
+					SchedCore:    m.schedCore,
+				})
+				if cerr != nil {
+					log.G(ctx).WithError(cerr).Warn("prewarm fill: create command failed")
+					break
+				}
+				out, runcErr := cmd.CombinedOutput()
+				if runcErr != nil {
+					log.G(ctx).WithError(runcErr).Warnf("prewarm fill: command failed: %s", string(out))
+					break
+				}
+				resp := bytes.TrimSpace(out)
+				params, perr := parseStartResponse(ctx, resp)
+				if perr != nil {
+					log.G(ctx).WithError(perr).Warn("prewarm fill: parse response failed")
+					break
+				}
+				pid := 0
+				if cmd.Process != nil {
+					pid = cmd.Process.Pid
+				}
+				m.pool.Register(ctx, ns, runtime, params.Address, pid)
+			}
+		}(ctx, ns, opts.Runtime)
+	}
 
 	return shim, nil
 }
