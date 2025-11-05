@@ -19,6 +19,7 @@ package v2
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,6 +152,11 @@ func NewShimManager(ctx context.Context, config *ManagerConfig) (*ShimManager, e
 		sandboxStore:           config.SandboxStore,
 	}
 
+	// Initialize prewarm pool if enabled.
+	if os.Getenv("CONTAINERD_SHIM_PREWARM_POOL") == "1" {
+		m.pool = NewShimPool()
+	}
+
 	if err := m.loadExistingTasks(ctx); err != nil {
 		return nil, err
 	}
@@ -174,6 +180,8 @@ type ShimManager struct {
 	// runtimePaths is a cache of `runtime names` -> `resolved fs path`
 	runtimePaths sync.Map
 	sandboxStore sandbox.Store
+	// Optional prewarm shim pool (feature-gated).
+	pool *ShimPool
 }
 
 // ID of the shim manager
@@ -256,6 +264,64 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 		return nil, err
 	}
 	ctx = log.WithLogger(ctx, log.G(ctx).WithField("namespace", ns))
+
+	// Try to reuse a prewarmed shim from pool when enabled.
+	if m.pool != nil {
+		if item := m.pool.GetIdle(ctx, ns, opts.Runtime); item != nil {
+			onClose := func() {
+				log.G(ctx).WithField("id", id).Info("pooled shim disconnected")
+				m.shims.Delete(ctx, id)
+			}
+			params := shimbinary.BootstrapParams{
+				Version:  3,
+				Address:  item.Address,
+				Protocol: "ttrpc",
+			}
+
+			// Open the shim log pipe and copy logs to containerd stderr.
+			shimCtx, cancelShimLog := context.WithCancel(ctx)
+			f, lerr := openShimLog(shimCtx, bundle, shimbinary.AnonReconnectDialer)
+			if lerr != nil {
+				log.G(ctx).WithError(lerr).Warn("open shim log pipe for pooled shim failed, falling back to new shim")
+				m.pool.Remove(ctx, ns, item)
+			} else {
+				go func() {
+					defer f.Close()
+					_, err := io.Copy(os.Stderr, f)
+					err = checkCopyShimLogError(ctx, err)
+					if err != nil {
+						log.G(ctx).WithError(err).Error("copy shim log (pooled)")
+					}
+				}()
+
+				conn, cerr := makeConnection(ctx, params, func() {
+					onClose()
+					cancelShimLog()
+					f.Close()
+				})
+				if cerr == nil {
+					// Persist address under bundle for later reload.
+					if err := shimbinary.WriteAddress(filepath.Join(bundle.Path, "address"), item.Address); err != nil {
+						log.G(ctx).WithError(err).Warn("failed to write address for pooled shim")
+					}
+
+					pshim := &shim{
+						bundle: bundle,
+						client: conn,
+					}
+
+					log.G(ctx).WithFields(log.Fields{
+						"address": item.Address,
+						"pid":     item.PID,
+					}).Info("startShim: reused prewarmed shim from pool")
+
+					return pshim, nil
+				}
+				log.G(ctx).WithError(cerr).Warn("failed to connect to pooled shim, removing from pool and falling back")
+				m.pool.Remove(ctx, ns, item)
+			}
+		}
+	}
 
 	topts := opts.TaskOptions
 	if topts == nil || topts.GetValue() == nil {
