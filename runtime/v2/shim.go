@@ -217,7 +217,7 @@ func parseStartResponse(ctx context.Context, response []byte) (client.BootstrapP
 		params.Protocol = "ttrpc"
 	}
 
-	if params.Version > 2 {
+	if params.Version > 3 {
 		return client.BootstrapParams{}, fmt.Errorf("unsupported shim version (%d): %w", params.Version, errdefs.ErrNotImplemented)
 	}
 

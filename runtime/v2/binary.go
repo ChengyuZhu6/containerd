@@ -61,27 +61,67 @@ type binary struct {
 }
 
 func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ *shim, err error) {
-	args := []string{"-id", b.bundle.ID}
-	switch log.GetLevel() {
-	case log.DebugLevel, log.TraceLevel:
-		args = append(args, "-debug")
+	// Feature gate for prewarm: enable when CONTAINERD_SHIM_PREWARM=1
+	prewarmEnabled := os.Getenv("CONTAINERD_SHIM_PREWARM") == "1"
+	if prewarmEnabled {
+		// Optional runtime allowlist via CONTAINERD_SHIM_PREWARM_RUNTIMES=runtime1,runtime2
+		if allow := os.Getenv("CONTAINERD_SHIM_PREWARM_RUNTIMES"); allow != "" {
+			allowed := false
+			for _, r := range bytes.Split([]byte(allow), []byte(",")) {
+				if string(bytes.TrimSpace(r)) == b.runtime {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				prewarmEnabled = false
+			}
+		}
 	}
-	args = append(args, "start")
 
-	cmd, err := client.Command(
-		ctx,
-		&client.CommandConfig{
-			Runtime:      b.runtime,
-			Address:      b.containerdAddress,
-			TTRPCAddress: b.containerdTTRPCAddress,
-			Path:         b.bundle.Path,
-			Opts:         opts,
-			Args:         args,
-			SchedCore:    b.schedCore,
-		})
-	if err != nil {
-		return nil, err
+	buildArgs := func(action string) []string {
+		args := []string{"-id", b.bundle.ID}
+		switch log.GetLevel() {
+		case log.DebugLevel, log.TraceLevel:
+			args = append(args, "-debug")
+		}
+		args = append(args, action)
+		return args
 	}
+
+	runShim := func(action string) (response []byte, runErr error) {
+		args := buildArgs(action)
+
+		cmd, err := client.Command(
+			ctx,
+			&client.CommandConfig{
+				Runtime:      b.runtime,
+				Address:      b.containerdAddress,
+				TTRPCAddress: b.containerdTTRPCAddress,
+				Path:         b.bundle.Path,
+				Opts:         opts,
+				Args:         args,
+				SchedCore:    b.schedCore,
+			})
+		if err != nil {
+			return nil, err
+		}
+		log.G(ctx).WithFields(log.Fields{
+			"bundle_id": b.bundle.ID,
+			"runtime":   b.runtime,
+			"args":      args,
+		}).Info("binary.Start: executing shim command")
+
+		out, err := cmd.CombinedOutput()
+
+		log.G(ctx).Info("binary.Start: shim command execution completed")
+
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", out, err)
+		}
+		return bytes.TrimSpace(out), nil
+	}
+
 	// Windows needs a namespace when openShimLog
 	ns, _ := namespaces.Namespace(ctx)
 	shimCtx, cancelShimLog := context.WithCancel(namespaces.WithNamespace(context.Background(), ns))
@@ -99,35 +139,34 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 			f.Close()
 		}
 	}()
-	// open the log pipe and block until the writer is ready
-	// this helps with synchronization of the shim
 	// copy the shim's logs to containerd's output
 	go func() {
 		defer f.Close()
 		_, err := io.Copy(os.Stderr, f)
-		// To prevent flood of error messages, the expected error
-		// should be reset, like os.ErrClosed or os.ErrNotExist, which
-		// depends on platform.
 		err = checkCopyShimLogError(ctx, err)
 		if err != nil {
 			log.G(ctx).WithError(err).Error("copy shim log")
 		}
 	}()
 
-	log.G(ctx).WithFields(log.Fields{
-		"bundle_id": b.bundle.ID,
-		"runtime":   b.runtime,
-		"args":      args,
-	}).Info("binary.Start: executing shim command")
-
-	out, err := cmd.CombinedOutput()
-
-	log.G(ctx).Info("binary.Start: shim command execution completed")
-
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", out, err)
+	// Try prewarm first if enabled, otherwise fall back to start
+	var response []byte
+	if prewarmEnabled {
+		resp, perr := runShim("prewarm")
+		if perr == nil {
+			response = resp
+		} else {
+			// Prewarm failed, log and fall back to start
+			log.G(ctx).WithError(perr).Warn("shim prewarm failed, falling back to start")
+		}
 	}
-	response := bytes.TrimSpace(out)
+	if response == nil {
+		var serr error
+		response, serr = runShim("start")
+		if serr != nil {
+			return nil, serr
+		}
+	}
 
 	onCloseWithShimLog := func() {
 		onClose()
@@ -141,7 +180,21 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 
 	params, err := parseStartResponse(ctx, response)
 	if err != nil {
-		return nil, err
+		// If parse indicates unsupported (e.g., prewarm returned v3 but parser rejects),
+		// and we had attempted prewarm, then fall back to start once.
+		if prewarmEnabled {
+			log.G(ctx).WithError(err).Warn("parse prewarm response failed, retrying shim start")
+			resp, serr := runShim("start")
+			if serr != nil {
+				return nil, serr
+			}
+			params, err = parseStartResponse(ctx, resp)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	conn, err := makeConnection(ctx, params, onCloseWithShimLog)
