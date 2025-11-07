@@ -111,6 +111,12 @@ func GetResolver(ctx context.Context, cliContext *cli.Context) (remotes.Resolver
 	return docker.NewResolver(options), nil
 }
 
+// ResolverDefaultTLS creates TLS config from CLI flags
+// Returns nil if no TLS flags are set
+func ResolverDefaultTLS(cliContext *cli.Context) (*tls.Config, error) {
+	return resolverDefaultTLS(cliContext)
+}
+
 func resolverDefaultTLS(cliContext *cli.Context) (*tls.Config, error) {
 	tlsConfig := &tls.Config{}
 

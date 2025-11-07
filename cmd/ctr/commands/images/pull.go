@@ -105,9 +105,7 @@ command. As part of this process, we do the following:
 		defer cancel()
 
 		if !cliContext.Bool("local") {
-			unsupportedFlags := []string{"max-concurrent-downloads", "print-chainid",
-				"skip-verify", "tlscacert", "tlscert", "tlskey", // RegistryFlags
-			}
+			unsupportedFlags := []string{"max-concurrent-downloads", "print-chainid"}
 			for _, s := range unsupportedFlags {
 				if cliContext.IsSet(s) {
 					return fmt.Errorf("\"--%s\" requires \"--local\" flag", s)
@@ -159,6 +157,17 @@ command. As part of this process, we do the following:
 			if cliContext.Bool("plain-http") {
 				opts = append(opts, registry.WithDefaultScheme("http"))
 			}
+			
+			// Add TLS configuration if any TLS flags are set
+			// This takes precedence over hosts.toml TLS settings
+			tlsConfig, err := commands.ResolverDefaultTLS(cliContext)
+			if err != nil {
+				return err
+			}
+			if tlsConfig != nil {
+				opts = append(opts, registry.WithTLSConfig(tlsConfig))
+			}
+			
 			logStream := log.G(ctx).Writer()
 			if cliContext.Bool("http-dump") {
 				opts = append(opts, registry.WithHTTPDebug(), registry.WithClientStream(logStream))

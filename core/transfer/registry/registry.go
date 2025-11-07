@@ -18,6 +18,7 @@ package registry
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,7 @@ type registryOpts struct {
 	httpDebug     bool
 	httpTrace     bool
 	localStream   io.WriteCloser
+	tlsConfig     *tls.Config
 }
 
 // Opt sets registry-related configurations.
@@ -114,6 +116,14 @@ func WithClientStream(writer io.WriteCloser) Opt {
 	}
 }
 
+// WithTLSConfig specifies custom TLS configuration.
+func WithTLSConfig(tlsConfig *tls.Config) Opt {
+	return func(o *registryOpts) error {
+		o.tlsConfig = tlsConfig
+		return nil
+	}
+}
+
 // NewOCIRegistry initializes with hosts, authorizer callback, and headers
 func NewOCIRegistry(ctx context.Context, ref string, opts ...Opt) (*OCIRegistry, error) {
 	var ropts registryOpts
@@ -140,6 +150,10 @@ func NewOCIRegistry(ctx context.Context, ref string, opts ...Opt) (*OCIRegistry,
 	}
 	if ropts.defaultScheme != "" {
 		hostOptions.DefaultScheme = ropts.defaultScheme
+	}
+	
+	if ropts.tlsConfig != nil {
+		hostOptions.DefaultTLS = ropts.tlsConfig
 	}
 
 	hostOptions.UpdateClient = func(client *http.Client) error {

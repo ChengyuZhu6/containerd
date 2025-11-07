@@ -98,7 +98,6 @@ var pushCommand = &cli.Command{
 		if !cliContext.Bool("local") {
 			unsupportedFlags := []string{
 				"manifest", "manifest-type", "max-concurrent-uploaded-layers", "allow-non-distributable-blobs",
-				"skip-verify", "tlscacert", "tlscert", "tlskey", "http-dump", "http-trace", // RegistryFlags
 			}
 			for _, s := range unsupportedFlags {
 				if cliContext.IsSet(s) {
@@ -118,6 +117,25 @@ var pushCommand = &cli.Command{
 			if cliContext.Bool("plain-http") {
 				opts = append(opts, registry.WithDefaultScheme("http"))
 			}
+			
+			// Add TLS configuration if any TLS flags are set
+			// This takes precedence over hosts.toml TLS settings
+			tlsConfig, err := commands.ResolverDefaultTLS(cliContext)
+			if err != nil {
+				return err
+			}
+			if tlsConfig != nil {
+				opts = append(opts, registry.WithTLSConfig(tlsConfig))
+			}
+			
+			logStream := log.G(ctx).Writer()
+			if cliContext.Bool("http-dump") {
+				opts = append(opts, registry.WithHTTPDebug(), registry.WithClientStream(logStream))
+			}
+			if cliContext.Bool("http-trace") {
+				opts = append(opts, registry.WithHTTPTrace(), registry.WithClientStream(logStream))
+			}
+			
 			reg, err := registry.NewOCIRegistry(ctx, ref, opts...)
 			if err != nil {
 				return err
