@@ -43,8 +43,8 @@ message TransferOptions {
 | Image Store | Registry    | "push"      | 1.7 |
 | Object stream (Archive) | Image Store | "import" | 1.7 |
 | Image Store | Object stream (Archive) | "export" | 1.7 |
-| Object stream (Layer) | Mount/Snapshot | "unpack" | Not implemented |
-| Mount/Snapshot | Object stream (Layer) | "diff" | Not implemented |
+| Object stream (Layer) | Mount/Snapshot | "unpack" | 2.0 (Newly Implemented) |
+| Mount/Snapshot | Object stream (Layer) | "diff" | 2.0 (Newly Implemented) |
 | Image Store | Image Store | "tag" | 1.7 |
 | Registry | Registry | mirror registry image | Not implemented |
 
@@ -210,3 +210,103 @@ message AuthResponse {
 	google.protobuf.Timestamp expire_at = 4;
 }
 ```
+
+## Unpack and Diff Operations
+
+### Unpack Operation
+
+The unpack operation transfers a layer stream directly into a snapshot without requiring a full image. This is useful for:
+- Custom image building workflows
+- Layer-by-layer processing
+- Snapshot creation from individual layers
+
+**Go Interface:**
+```go
+// LayerSource provides layer data
+type LayerSource interface {
+    GetLayer(ctx context.Context) (ocispec.Descriptor, io.ReadCloser, error)
+}
+
+// SnapshotDestination receives unpacked layer data
+type SnapshotDestination interface {
+    PrepareSnapshot(ctx context.Context, key string, parent string) ([]mount.Mount, error)
+    CommitSnapshot(ctx context.Context, name, key string, opts ...snapshots.Opt) error
+    GetSnapshotter() snapshots.Snapshotter
+}
+```
+
+**Usage Example:**
+```go
+import (
+    "github.com/containerd/containerd/v2/core/transfer/layer"
+    "github.com/containerd/containerd/v2/core/transfer/snapshot"
+)
+
+// Create layer source from descriptor
+layerSrc := layer.NewStreamFromDescriptor(desc, contentStore)
+
+// Create snapshot destination
+snapDest := snapshot.NewDestination(snapshotter, "my-snapshot-key")
+
+// Execute transfer
+err := transferrer.Transfer(ctx, layerSrc, snapDest)
+```
+
+### Diff Operation
+
+The diff operation creates a layer from the difference between a snapshot and its parent. This is useful for:
+- Creating custom layers
+- Snapshot-based image building
+- Incremental backup workflows
+
+**Go Interface:**
+```go
+// SnapshotSource provides snapshot data for diff
+type SnapshotSource interface {
+    GetMounts(ctx context.Context) ([]mount.Mount, error)
+    GetParentMounts(ctx context.Context) ([]mount.Mount, error)
+    GetSnapshotter() snapshots.Snapshotter
+}
+
+// LayerDestination receives diff layer data
+type LayerDestination interface {
+    WriteLayer(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error
+}
+```
+
+**Usage Example:**
+```go
+import (
+    "github.com/containerd/containerd/v2/core/transfer/layer"
+    "github.com/containerd/containerd/v2/core/transfer/snapshot"
+)
+
+// Create snapshot source
+snapSrc := snapshot.NewSource(snapshotter, "my-snapshot-key",
+    snapshot.WithSourceParent("parent-key"))
+
+// Create layer destination
+layerDest := layer.NewDestination(contentStore)
+
+// Execute transfer
+err := transferrer.Transfer(ctx, snapSrc, layerDest)
+```
+
+### Proto Definitions
+
+```proto
+message LayerStream {
+    string stream_id = 1;
+    Descriptor desc = 2;
+}
+
+message SnapshotRef {
+    string snapshotter = 1;
+    string key = 2;
+    string parent = 3;
+    map<string, string> labels = 4;
+}
+```
+
+For more details and examples, see [UNPACK_DIFF.md](../core/transfer/UNPACK_DIFF.md).
+

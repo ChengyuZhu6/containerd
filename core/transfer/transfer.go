@@ -26,6 +26,8 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
 )
 
 type Transferrer interface {
@@ -140,6 +142,42 @@ type ImageUnpacker interface {
 // ImagePlatformsGetter is type which returns configured platforms.
 type ImagePlatformsGetter interface {
 	Platforms() []ocispec.Platform
+}
+
+// LayerSource represents a source for layer data
+type LayerSource interface {
+	// GetLayer returns the layer descriptor and reader
+	GetLayer(ctx context.Context) (ocispec.Descriptor, io.ReadCloser, error)
+}
+
+// SnapshotDestination represents a destination for unpacking layers into snapshots
+type SnapshotDestination interface {
+	// PrepareSnapshot prepares a snapshot for receiving layer data
+	PrepareSnapshot(ctx context.Context, key string, parent string) ([]mount.Mount, error)
+
+	// CommitSnapshot commits the snapshot
+	CommitSnapshot(ctx context.Context, name, key string, opts ...snapshots.Opt) error
+
+	// GetSnapshotter returns the snapshotter
+	GetSnapshotter() snapshots.Snapshotter
+}
+
+// SnapshotSource represents a source snapshot for creating layer diffs
+type SnapshotSource interface {
+	// GetMounts returns the mounts for the snapshot
+	GetMounts(ctx context.Context) ([]mount.Mount, error)
+
+	// GetParentMounts returns the mounts for the parent snapshot (for diff)
+	GetParentMounts(ctx context.Context) ([]mount.Mount, error)
+
+	// GetSnapshotter returns the snapshotter
+	GetSnapshotter() snapshots.Snapshotter
+}
+
+// LayerDestination represents a destination for layer data
+type LayerDestination interface {
+	// WriteLayer writes layer data
+	WriteLayer(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error
 }
 
 // UnpackConfiguration specifies the platform and snapshotter to use for resolving

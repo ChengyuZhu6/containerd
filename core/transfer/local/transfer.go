@@ -95,6 +95,16 @@ func (ts *localTransferService) Transfer(ctx context.Context, src interface{}, d
 			// TODO: verify imports with ImageVerifiers?
 			return ts.importStream(ctx, s, d, topts)
 		}
+	case transfer.LayerSource:
+		switch d := dest.(type) {
+		case transfer.SnapshotDestination:
+			return ts.unpackLayer(ctx, s, d, topts)
+		}
+	case transfer.SnapshotSource:
+		switch d := dest.(type) {
+		case transfer.LayerDestination:
+			return ts.diffSnapshot(ctx, s, d, topts)
+		}
 	}
 	return fmt.Errorf("unable to transfer from %s to %s: %w", name(src), name(dest), errdefs.ErrNotImplemented)
 }
