@@ -18,6 +18,8 @@ package registry
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +54,8 @@ type registryOpts struct {
 	httpDebug     bool
 	httpTrace     bool
 	localStream   io.WriteCloser
+	tlsHelper     TLSHelper
+	skipVerify    bool
 }
 
 // Opt sets registry-related configurations.
@@ -114,6 +118,22 @@ func WithClientStream(writer io.WriteCloser) Opt {
 	}
 }
 
+// WithTLSHelper configures a helper that provides TLS certificates and keys.
+func WithTLSHelper(helper TLSHelper) Opt {
+	return func(o *registryOpts) error {
+		o.tlsHelper = helper
+		return nil
+	}
+}
+
+// WithSkipVerify disables TLS certificate verification.
+func WithSkipVerify(skip bool) Opt {
+	return func(o *registryOpts) error {
+		o.skipVerify = skip
+		return nil
+	}
+}
+
 // NewOCIRegistry initializes with hosts, authorizer callback, and headers
 func NewOCIRegistry(ctx context.Context, ref string, opts ...Opt) (*OCIRegistry, error) {
 	var ropts registryOpts
@@ -142,6 +162,77 @@ func NewOCIRegistry(ctx context.Context, ref string, opts ...Opt) (*OCIRegistry,
 		hostOptions.DefaultScheme = ropts.defaultScheme
 	}
 
+	// Configure TLS
+	if ropts.tlsHelper != nil || ropts.skipVerify {
+		tlsConfig := &tls.Config{}
+		if ropts.skipVerify {
+			tlsConfig.InsecureSkipVerify = true
+		}
+		if ropts.tlsHelper != nil {
+			// Set up GetClientCertificate callback for dynamic client cert loading
+			tlsConfig.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				certPEM, err := ropts.tlsHelper.GetTLSData(context.Background(), info.Context.Value("host").(string), transfertypes.TLSRequestType_CLIENT_CERT)
+				if err != nil {
+					return nil, err
+				}
+				keyPEM, err := ropts.tlsHelper.GetTLSData(context.Background(), info.Context.Value("host").(string), transfertypes.TLSRequestType_CLIENT_KEY)
+				if err != nil {
+					return nil, err
+				}
+				cert, err := tls.X509KeyPair(certPEM, keyPEM)
+				if err != nil {
+					return nil, fmt.Errorf("failed to load X509 key pair: %w", err)
+				}
+				return &cert, nil
+			}
+
+			// Set up VerifyPeerCertificate callback for dynamic CA cert loading
+			if !ropts.skipVerify {
+				tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+					// Get CA certs from helper
+					caPEM, err := ropts.tlsHelper.GetTLSData(context.Background(), "", transfertypes.TLSRequestType_CA_CERT)
+					if err != nil {
+					// If no CA provided, use system pool
+					return nil
+				}
+				
+				rootPool, err := x509.SystemCertPool()
+				if err != nil {
+					rootPool = x509.NewCertPool()
+				}
+				if !rootPool.AppendCertsFromPEM(caPEM) {
+					return fmt.Errorf("unable to load CA cert from TLS helper")
+				}
+					
+					// Verify using the custom CA pool
+					opts := x509.VerifyOptions{
+						Roots:         rootPool,
+						Intermediates: x509.NewCertPool(),
+					}
+					
+					for _, chain := range verifiedChains {
+						for i, cert := range chain {
+							if i > 0 {
+								opts.Intermediates.AddCert(cert)
+							}
+						}
+					}
+					
+					if len(rawCerts) > 0 {
+						cert, err := x509.ParseCertificate(rawCerts[0])
+						if err != nil {
+							return err
+						}
+						_, err = cert.Verify(opts)
+						return err
+					}
+					return nil
+				}
+			}
+		}
+		hostOptions.DefaultTLS = tlsConfig
+	}
+
 	hostOptions.UpdateClient = func(client *http.Client) error {
 		if ropts.httpDebug {
 			httpdbg.DumpRequests(ctx, client, ropts.localStream)
@@ -167,6 +258,8 @@ func NewOCIRegistry(ctx context.Context, ref string, opts ...Opt) (*OCIRegistry,
 		httpDebug:     ropts.httpDebug,
 		httpTrace:     ropts.httpTrace,
 		localStream:   ropts.localStream,
+		tlsHelper:     ropts.tlsHelper,
+		skipVerify:    ropts.skipVerify,
 	}, nil
 }
 
@@ -180,6 +273,11 @@ type Credentials struct {
 	Username string
 	Secret   string
 	Header   string
+}
+
+// TLSHelper provides TLS certificates and keys dynamically
+type TLSHelper interface {
+	GetTLSData(ctx context.Context, host string, dataType transfertypes.TLSRequestType) ([]byte, error)
 }
 
 // OCI
@@ -198,6 +296,9 @@ type OCIRegistry struct {
 	httpDebug   bool
 	httpTrace   bool
 	localStream io.WriteCloser
+
+	tlsHelper  TLSHelper
+	skipVerify bool
 
 	// This could be an interface which returns resolver?
 	// Resolver could also be a plug-able interface, to call out to a program to fetch?
@@ -304,6 +405,68 @@ func (r *OCIRegistry) MarshalAny(ctx context.Context, sm streaming.StreamCreator
 		res.AuthStream = sid
 	}
 
+	// Setup TLS stream if TLS helper is provided
+	if r.tlsHelper != nil || r.skipVerify {
+		tlsConfig := &transfertypes.TLSConfig{
+			SkipVerify: r.skipVerify,
+		}
+
+		if r.tlsHelper != nil {
+			sid := tstreaming.GenerateID("tls")
+			stream, err := sm.Create(ctx, sid)
+			if err != nil {
+				return nil, err
+			}
+			go func() {
+				// Check for context cancellation as well
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					req, err := stream.Recv()
+					if err != nil {
+						// If not EOF, log error
+						return
+					}
+
+					var tlsReq transfertypes.TLSRequest
+					if err := typeurl.UnmarshalTo(req, &tlsReq); err != nil {
+						log.G(ctx).WithError(err).Error("failed to unmarshal TLS request")
+						continue
+					}
+
+					data, err := r.tlsHelper.GetTLSData(ctx, tlsReq.Host, tlsReq.Type)
+					var resp transfertypes.TLSResponse
+					if err != nil {
+						log.G(ctx).WithError(err).Error("failed to get TLS data")
+						resp.Error = err.Error()
+					} else {
+						resp.Data = data
+					}
+
+					a, err := typeurl.MarshalAny(&resp)
+					if err != nil {
+						log.G(ctx).WithError(err).Error("failed to marshal TLS response")
+						continue
+					}
+
+					if err := stream.Send(a); err != nil {
+						if !errors.Is(err, io.EOF) {
+							log.G(ctx).WithError(err).Error("unexpected send failure")
+						}
+						return
+					}
+				}
+			}()
+			tlsConfig.TlsStream = sid
+		}
+
+		res.Tls = tlsConfig
+	}
+
 	if r.httpDebug || r.httpTrace {
 		switch {
 		case r.httpDebug && r.httpTrace:
@@ -380,6 +543,102 @@ func (r *OCIRegistry) UnmarshalAny(ctx context.Context, sm streaming.StreamGette
 				return c.Username, c.Secret, nil
 			}
 		}
+
+		// Handle TLS configuration
+		if s.Resolver.Tls != nil {
+			r.skipVerify = s.Resolver.Tls.SkipVerify
+
+			if sid := s.Resolver.Tls.TlsStream; sid != "" {
+				stream, err := sm.Get(ctx, sid)
+				if err != nil {
+					log.G(ctx).WithError(err).WithField("stream", sid).Debug("failed to get TLS stream")
+					return err
+				}
+				r.tlsHelper = &tlsCallback{
+					stream: stream,
+				}
+			}
+
+			// Configure TLS for host options
+			tlsConfig := &tls.Config{}
+			if r.skipVerify {
+				tlsConfig.InsecureSkipVerify = true
+			}
+
+			if r.tlsHelper != nil {
+				// Set up GetClientCertificate callback for dynamic client cert loading
+				tlsConfig.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+					// Extract host from the connection
+					host := ""
+					if info.Context != nil {
+						if h, ok := info.Context.Value("host").(string); ok {
+							host = h
+						}
+					}
+
+					certPEM, err := r.tlsHelper.GetTLSData(ctx, host, transfertypes.TLSRequestType_CLIENT_CERT)
+					if err != nil {
+						return nil, err
+					}
+					keyPEM, err := r.tlsHelper.GetTLSData(ctx, host, transfertypes.TLSRequestType_CLIENT_KEY)
+					if err != nil {
+						return nil, err
+					}
+					cert, err := tls.X509KeyPair(certPEM, keyPEM)
+					if err != nil {
+						return nil, fmt.Errorf("failed to load X509 key pair: %w", err)
+					}
+					return &cert, nil
+				}
+
+				// Set up VerifyPeerCertificate callback for dynamic CA cert loading
+				if !r.skipVerify {
+					tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+						// Get CA certs from helper
+						caPEM, err := r.tlsHelper.GetTLSData(ctx, "", transfertypes.TLSRequestType_CA_CERT)
+						if err != nil {
+							// If no CA provided, use system pool
+							return nil
+						}
+
+						rootPool, err := x509.SystemCertPool()
+						if err != nil {
+							rootPool = x509.NewCertPool()
+						}
+						if !rootPool.AppendCertsFromPEM(caPEM) {
+							return fmt.Errorf("unable to load CA cert from TLS helper")
+						}
+
+						// Verify using the custom CA pool
+						opts := x509.VerifyOptions{
+							Roots:         rootPool,
+							Intermediates: x509.NewCertPool(),
+						}
+
+						for _, chain := range verifiedChains {
+							for i, cert := range chain {
+								if i > 0 {
+									opts.Intermediates.AddCert(cert)
+								}
+							}
+						}
+
+						if len(rawCerts) > 0 {
+							cert, err := x509.ParseCertificate(rawCerts[0])
+							if err != nil {
+								return err
+							}
+							_, err = cert.Verify(opts)
+							return err
+						}
+						return nil
+					}
+				}
+			}
+
+			hostOptions.DefaultTLS = tlsConfig
+		}
+
 		r.headers = http.Header{}
 		for k, v := range s.Resolver.Headers {
 			r.headers.Add(k, v)
@@ -473,4 +732,39 @@ func (cc *credCallback) GetCredentials(ctx context.Context, ref, host string) (C
 	}
 
 	return creds, nil
+}
+
+type tlsCallback struct {
+	sync.Mutex
+	stream streaming.Stream
+}
+
+func (tc *tlsCallback) GetTLSData(ctx context.Context, host string, dataType transfertypes.TLSRequestType) ([]byte, error) {
+	tc.Lock()
+	defer tc.Unlock()
+
+	req := &transfertypes.TLSRequest{
+		Host: host,
+		Type: dataType,
+	}
+	anyType, err := typeurl.MarshalAny(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := tc.stream.Send(anyType); err != nil {
+		return nil, err
+	}
+	resp, err := tc.stream.Recv()
+	if err != nil {
+		return nil, err
+	}
+	var tlsResp transfertypes.TLSResponse
+	if err := typeurl.UnmarshalTo(resp, &tlsResp); err != nil {
+		return nil, err
+	}
+	if tlsResp.Error != "" {
+		return nil, fmt.Errorf("TLS callback error: %s", tlsResp.Error)
+	}
+
+	return tlsResp.Data, nil
 }
