@@ -19,7 +19,6 @@ package client
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -32,6 +31,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
@@ -406,8 +406,16 @@ func (i *image) getLayers(ctx context.Context, manifest ocispec.Manifest) ([]roo
 			imageLayers = append(imageLayers, ociLayer)
 		}
 	}
+	log.G(ctx).Debugf("imageLayers: %v", imageLayers)
+	log.G(ctx).Debugf("diffIDs: %v", diffIDs)
 	if len(diffIDs) != len(imageLayers) {
-		return nil, errors.New("mismatched image rootfs and manifest layers")
+		// Provide detailed error information for debugging
+		var layerTypes []string
+		for _, layer := range manifest.Layers {
+			layerTypes = append(layerTypes, layer.MediaType)
+		}
+		return nil, fmt.Errorf("mismatched image rootfs and manifest layers: rootfs has %d layers, manifest has %d image layers (total %d descriptors with types: %v)",
+			len(diffIDs), len(imageLayers), len(manifest.Layers), layerTypes)
 	}
 	layers := make([]rootfs.Layer, len(diffIDs))
 	for i := range diffIDs {

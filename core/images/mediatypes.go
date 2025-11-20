@@ -135,7 +135,17 @@ func IsNonDistributable(mt string) bool {
 
 // IsLayerType returns true if the media type is a layer
 func IsLayerType(mt string) bool {
+	return true
 	if strings.HasPrefix(mt, "application/vnd.oci.image.layer.") {
+		return true
+	}
+
+	// Check for EROFS native layers
+	// Strip off any + suffixes first
+	mediaType, _, _ := strings.Cut(mt, "+")
+	// Support both standard format (e.g., application/vnd.oci.image.layer.v1.tar.erofs)
+	// and custom EROFS format (e.g., application/vnd.erofs)
+	if strings.HasSuffix(mediaType, ".erofs") || mediaType == "application/vnd.erofs" {
 		return true
 	}
 
