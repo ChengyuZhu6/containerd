@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	eventstypes "github.com/containerd/containerd/api/events"
@@ -37,6 +38,10 @@ var serviceLog = logrus.WithFields(logrus.Fields{
 	"name":   "kata-direct-runtime",
 })
 
+type serviceOptions struct {
+	configPath string
+}
+
 type service struct {
 	mu         sync.Mutex
 	vci        vc.VC
@@ -51,6 +56,8 @@ type service struct {
 	cancel     context.CancelFunc
 	publisher  shim.Publisher
 	exitCh     chan struct{}
+	cleaned    bool
+	configPath string
 }
 
 type container struct {
@@ -64,7 +71,7 @@ type container struct {
 	cType    vc.ContainerType
 }
 
-func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func()) (shim.Shim, error) {
+func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func(), opts *serviceOptions) (shim.Shim, error) {
 	serviceLog = serviceLog.WithFields(logrus.Fields{
 		"sandbox": id,
 		"pid":     os.Getpid(),
@@ -73,6 +80,10 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 	ns, found := namespaces.Namespace(ctx)
 	if !found {
 		return nil, fmt.Errorf("namespace not found in context")
+	}
+
+	if opts == nil {
+		opts = &serviceOptions{}
 	}
 
 	vci := &vc.VCImpl{}
@@ -91,6 +102,7 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 		events:     make(chan interface{}, 128),
 		publisher:  publisher,
 		exitCh:     make(chan struct{}),
+		configPath: opts.configPath,
 	}
 
 	go s.forwardEvents()
@@ -161,6 +173,15 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.cleaned {
+		serviceLog.Debug("Cleanup invoked after already completed")
+		return &taskAPI.DeleteResponse{
+			ExitedAt:   timestamppb.New(time.Now()),
+			ExitStatus: 0,
+		}, nil
+	}
+	s.cleaned = true
 
 	close(s.exitCh)
 
@@ -378,9 +399,9 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 		}()
 
 		if c.cType.IsSandbox() {
-			errCh <- s.sandbox.Kill(ctx, r.Signal, r.All)
+			errCh <- s.sandbox.KillContainer(ctx, c.id, syscall.Signal(r.Signal), r.All)
 		} else {
-			errCh <- s.sandbox.KillContainer(ctx, c.id, r.Signal, r.All)
+			errCh <- s.sandbox.KillContainer(ctx, c.id, syscall.Signal(r.Signal), r.All)
 		}
 	}()
 
@@ -413,7 +434,7 @@ func (s *service) Pause(ctx context.Context, r *taskAPI.PauseRequest) (*emptypb.
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
-	if err := s.sandbox.Pause(ctx); err != nil {
+	if err := s.sandbox.PauseContainer(ctx, r.ID); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -432,7 +453,7 @@ func (s *service) Resume(ctx context.Context, r *taskAPI.ResumeRequest) (*emptyp
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
-	if err := s.sandbox.Resume(ctx); err != nil {
+	if err := s.sandbox.ResumeContainer(ctx, r.ID); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -448,7 +469,29 @@ func (s *service) Exec(ctx context.Context, r *taskAPI.ExecProcessRequest) (*emp
 }
 
 func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*emptypb.Empty, error) {
-	return nil, errdefs.ToGRPC(errdefs.ErrNotImplemented)
+	s.mu.Lock()
+	c, ok := s.containers[r.ID]
+	sandbox := s.sandbox
+	s.mu.Unlock()
+
+	if !ok {
+		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if sandbox == nil {
+		return nil, fmt.Errorf("sandbox not found")
+	}
+
+	execID := r.ExecID
+	if execID == "" {
+		execID = c.id
+	}
+
+	if err := sandbox.WinsizeProcess(ctx, c.id, execID, r.Height, r.Width); err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+
+	return empty, nil
 }
 
 func (s *service) CloseIO(ctx context.Context, r *taskAPI.CloseIORequest) (*emptypb.Empty, error) {
@@ -464,7 +507,59 @@ func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*em
 }
 
 func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.WaitResponse, error) {
-	return nil, errdefs.ToGRPC(errdefs.ErrNotImplemented)
+	s.mu.Lock()
+	c, ok := s.containers[r.ID]
+	if !ok {
+		s.mu.Unlock()
+		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if c.status == task.Status_STOPPED && !c.exitTime.IsZero() {
+		exitedAt := timestamppb.New(c.exitTime)
+		s.mu.Unlock()
+		return &taskAPI.WaitResponse{
+			ExitStatus: c.exit,
+			ExitedAt:   exitedAt,
+		}, nil
+	}
+
+	sandbox := s.sandbox
+	s.mu.Unlock()
+
+	if sandbox == nil {
+		return nil, fmt.Errorf("sandbox not found")
+	}
+
+	execID := r.ExecID
+	if execID == "" {
+		execID = c.id
+	}
+
+	exitStatus, err := sandbox.WaitProcess(ctx, c.id, execID)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+
+	exitTime := time.Now()
+
+	s.mu.Lock()
+	c.exit = uint32(exitStatus)
+	c.exitTime = exitTime
+	c.status = task.Status_STOPPED
+	s.mu.Unlock()
+
+	s.events <- &eventstypes.TaskExit{
+		ContainerID: c.id,
+		ID:          execID,
+		Pid:         s.hpid,
+		ExitStatus:  uint32(exitStatus),
+		ExitedAt:    timestamppb.New(exitTime),
+	}
+
+	return &taskAPI.WaitResponse{
+		ExitStatus: uint32(exitStatus),
+		ExitedAt:   timestamppb.New(exitTime),
+	}, nil
 }
 
 func (s *service) Stats(ctx context.Context, r *taskAPI.StatsRequest) (*taskAPI.StatsResponse, error) {

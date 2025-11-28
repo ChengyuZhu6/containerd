@@ -41,7 +41,16 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 
 	rootfs := filepath.Join(bundlePath, "rootfs")
 	if len(r.Rootfs) > 0 {
-		if err := mount.All(r.Rootfs, rootfs); err != nil {
+		// Convert []*types.Mount to []mount.Mount
+		mounts := make([]mount.Mount, len(r.Rootfs))
+		for i, m := range r.Rootfs {
+			mounts[i] = mount.Mount{
+				Type:    m.Type,
+				Source:  m.Source,
+				Options: m.Options,
+			}
+		}
+		if err := mount.All(mounts, rootfs); err != nil {
 			return nil, fmt.Errorf("failed to mount rootfs: %w", err)
 		}
 		rootFs.Mounted = true
@@ -92,6 +101,11 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociSpec *specs.Spec, rootFs vc.RootFs) error {
 	if s.config == nil {
 		configPath := oci.GetSandboxConfigPath(ociSpec.Annotations)
+		if configPath == "" {
+			configPath = s.configPath
+		}
+		serviceLog.WithField("config", configPath).Info("loading kata configuration")
+
 		_, runtimeConfig, err := katautils.LoadConfiguration(configPath, false)
 		if err != nil {
 			return fmt.Errorf("failed to load kata configuration: %w", err)
