@@ -97,6 +97,19 @@ func init() {
 				return nil, err
 			}
 
+			// Store plugin context for later use
+			shimManager.pluginContext = ic
+
+			// Register builtin runtime plugins (e.g., kata-direct)
+			// Try to get kata-direct plugin if it exists
+			kataPlugin, err := ic.GetByID(plugin.RuntimePluginV2, "kata-direct")
+			if err != nil {
+				log.G(ic.Context).WithError(err).Debug("kata-direct plugin not available during task init")
+			} else {
+				log.G(ic.Context).Info("registering builtin runtime: io.containerd.kata-direct.v2")
+				shimManager.RegisterBuiltinRuntime("io.containerd.kata-direct.v2", kataPlugin)
+			}
+
 			return NewTaskManager(shimManager), nil
 		},
 	})
@@ -174,6 +187,61 @@ type ShimManager struct {
 	// runtimePaths is a cache of `runtime names` -> `resolved fs path`
 	runtimePaths sync.Map
 	sandboxStore sandbox.Store
+	// builtinRuntimes is a map of builtin runtime plugins
+	builtinRuntimes map[string]interface{}
+	// pluginContext for accessing other plugins
+	pluginContext *plugin.InitContext
+}
+
+type serviceFactory interface {
+	CreateService(ctx context.Context, id string, opts runtime.CreateOpts) (shimbinary.Shim, error)
+}
+
+// RegisterBuiltinRuntime registers a builtin runtime plugin
+func (m *ShimManager) RegisterBuiltinRuntime(name string, p interface{}) {
+	if m.builtinRuntimes == nil {
+		m.builtinRuntimes = make(map[string]interface{})
+	}
+	m.builtinRuntimes[name] = p
+}
+
+// builtinShimWrapper wraps a builtin shim service to implement ShimInstance
+type builtinShimWrapper struct {
+	Shim   shimbinary.Shim
+	id     string
+	ns     string
+	bundle string
+}
+
+func (b *builtinShimWrapper) ID() string {
+	return b.id
+}
+
+func (b *builtinShimWrapper) Namespace() string {
+	if b.ns != "" {
+		return b.ns
+	}
+	return "default"
+}
+
+func (b *builtinShimWrapper) Bundle() string {
+	return b.bundle
+}
+
+func (b *builtinShimWrapper) Client() any {
+	// For builtin runtime, return the Shim itself as the client
+	// This allows direct method calls without going through TTRPC/GRPC
+	return b.Shim
+}
+
+func (b *builtinShimWrapper) Delete(ctx context.Context) error {
+	_, err := b.Shim.Cleanup(ctx)
+	return err
+}
+
+func (b *builtinShimWrapper) Close() error {
+	_, err := b.Shim.Cleanup(context.Background())
+	return err
 }
 
 // ID of the shim manager
@@ -192,6 +260,52 @@ func (m *ShimManager) Start(ctx context.Context, id string, opts runtime.CreateO
 			bundle.Delete()
 		}
 	}()
+
+	// Check if this is a builtin runtime (e.g., kata-direct)
+	builtinFactory, ok := m.builtinRuntimes[opts.Runtime]
+	if !ok && m.pluginContext != nil && opts.Runtime == "io.containerd.kata-direct.v2" {
+		// Try to dynamically load kata-direct plugin
+		kataPlugin, err := m.pluginContext.GetByID(plugin.RuntimePluginV2, "kata-direct")
+		if err == nil {
+			log.G(ctx).Info("dynamically loading kata-direct plugin")
+			m.RegisterBuiltinRuntime("io.containerd.kata-direct.v2", kataPlugin)
+			builtinFactory = kataPlugin
+			ok = true
+		}
+	}
+
+	if ok {
+		log.G(ctx).WithField("runtime", opts.Runtime).Info("using builtin runtime plugin")
+
+		factory, ok := builtinFactory.(serviceFactory)
+		if !ok {
+			return nil, fmt.Errorf("builtin runtime %s does not implement serviceFactory", opts.Runtime)
+		}
+
+		// Create a new service instance with proper context
+		shimService, err := factory.CreateService(ctx, id, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create builtin runtime service: %w", err)
+		}
+
+		// Get namespace from context
+		ns, _ := namespaces.Namespace(ctx)
+
+		// Wrap it as ShimInstance
+		builtinShim := &builtinShimWrapper{
+			Shim:   shimService,
+			id:     id,
+			ns:     ns,
+			bundle: bundle.Path,
+		}
+
+		// Add to shims map
+		if err := m.shims.Add(ctx, builtinShim); err != nil {
+			return nil, err
+		}
+
+		return builtinShim, nil
+	}
 
 	// This container belongs to sandbox which supposed to be already started via sandbox API.
 	if opts.SandboxID != "" {

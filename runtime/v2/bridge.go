@@ -25,6 +25,7 @@ import (
 
 	v2 "github.com/containerd/containerd/api/runtime/task/v2"
 	v3 "github.com/containerd/containerd/api/runtime/task/v3"
+	shimbinary "github.com/containerd/containerd/runtime/v2/shim"
 	"github.com/containerd/ttrpc"
 )
 
@@ -34,6 +35,7 @@ import (
 // Supported client types are:
 // - *ttrpc.Client
 // - grpc.ClientConnInterface
+// - shimbinary.Shim (for builtin runtimes)
 //
 // In 1.7 we support TaskService v2 (for backward compatibility with existing shims) and GRPC TaskService v3.
 // In 2.0 we'll switch to TaskService v3 only for both TTRPC and GRPC, which will remove overhead of mapping v2 structs to v3 structs.
@@ -43,6 +45,9 @@ func NewTaskClient(client interface{}) (v2.TaskService, error) {
 		return v2.NewTaskClient(c), nil
 	case grpc.ClientConnInterface:
 		return &grpcBridge{v3.NewTaskClient(c)}, nil
+	case shimbinary.Shim:
+		// Builtin runtime - use the Shim directly
+		return c, nil
 	default:
 		return nil, fmt.Errorf("unsupported shim client type %T", c)
 	}
