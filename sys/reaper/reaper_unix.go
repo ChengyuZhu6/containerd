@@ -100,6 +100,16 @@ func (m *Monitor) Start(c *exec.Cmd) (chan runc.Exit, error) {
 	return ec, nil
 }
 
+// StartLocked starts the command locked to an OS thread and registers the process with the reaper
+func (m *Monitor) StartLocked(c *exec.Cmd) (chan runc.Exit, error) {
+	ec := m.Subscribe()
+	if err := c.Start(); err != nil {
+		m.Unsubscribe(ec)
+		return nil, err
+	}
+	return ec, nil
+}
+
 // Wait blocks until a process is signal as dead.
 // User should rely on the value of the exit status to determine if the
 // command was successful or not.

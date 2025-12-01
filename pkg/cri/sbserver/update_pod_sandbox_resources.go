@@ -14,15 +14,19 @@
    limitations under the License.
 */
 
-package builtins
+package sbserver
 
 import (
-	_ "github.com/containerd/containerd/api/types/runc/options"
-	_ "github.com/containerd/containerd/metrics/cgroups"
-	_ "github.com/containerd/containerd/metrics/cgroups/v2"
-	_ "github.com/containerd/containerd/runtime/v1/linux"
-	_ "github.com/containerd/containerd/runtime/v2/kata-direct"
-	_ "github.com/containerd/containerd/snapshots/blockfile/plugin"
-	_ "github.com/containerd/containerd/snapshots/native/plugin"
-	_ "github.com/containerd/containerd/snapshots/overlay/plugin"
+	"context"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+// UpdatePodSandboxResources updates the pod sandbox resources.
+func (c *criService) UpdatePodSandboxResources(ctx context.Context, r *runtime.UpdatePodSandboxResourcesRequest) (*runtime.UpdatePodSandboxResourcesResponse, error) {
+	// This is a best-effort operation
+	// For now, return unimplemented as this requires deeper integration with cgroup management
+	return nil, status.Errorf(codes.Unimplemented, "method UpdatePodSandboxResources not implemented")
+}
