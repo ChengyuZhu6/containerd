@@ -1588,6 +1588,38 @@ func (in *instrumentedService) UpdateRuntimeConfig(ctx context.Context, r *runti
 	return res, errdefs.ToGRPC(err)
 }
 
+func (in *instrumentedService) RuntimeConfig(ctx context.Context, r *runtime.RuntimeConfigRequest) (res *runtime.RuntimeConfigResponse, err error) {
+	if err := in.checkInitialized(); err != nil {
+		return nil, err
+	}
+	log.G(ctx).Debug("RuntimeConfig")
+	defer func() {
+		if err != nil {
+			log.G(ctx).WithError(err).Error("RuntimeConfig failed")
+		} else {
+			log.G(ctx).Debug("RuntimeConfig returns successfully")
+		}
+	}()
+	res, err = in.c.RuntimeConfig(ctrdutil.WithNamespace(ctx), r)
+	return res, errdefs.ToGRPC(err)
+}
+
+func (in *instrumentedService) UpdatePodSandboxResources(ctx context.Context, r *runtime.UpdatePodSandboxResourcesRequest) (res *runtime.UpdatePodSandboxResourcesResponse, err error) {
+	if err := in.checkInitialized(); err != nil {
+		return nil, err
+	}
+	log.G(ctx).Debugf("UpdatePodSandboxResources for sandbox %q", r.GetPodSandboxId())
+	defer func() {
+		if err != nil {
+			log.G(ctx).WithError(err).Errorf("UpdatePodSandboxResources for %q failed", r.GetPodSandboxId())
+		} else {
+			log.G(ctx).Debugf("UpdatePodSandboxResources for %q returns successfully", r.GetPodSandboxId())
+		}
+	}()
+	res, err = in.c.UpdatePodSandboxResources(ctrdutil.WithNamespace(ctx), r)
+	return res, errdefs.ToGRPC(err)
+}
+
 func (in *instrumentedAlphaService) UpdateRuntimeConfig(ctx context.Context, r *runtime_alpha.UpdateRuntimeConfigRequest) (res *runtime_alpha.UpdateRuntimeConfigResponse, err error) {
 	if err := in.checkInitialized(ctx); err != nil {
 		return nil, err
