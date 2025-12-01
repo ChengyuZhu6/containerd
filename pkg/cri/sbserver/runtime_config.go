@@ -14,15 +14,17 @@
    limitations under the License.
 */
 
-package builtins
+package sbserver
 
 import (
-	_ "github.com/containerd/containerd/api/types/runc/options"
-	_ "github.com/containerd/containerd/metrics/cgroups"
-	_ "github.com/containerd/containerd/metrics/cgroups/v2"
-	_ "github.com/containerd/containerd/runtime/v1/linux"
-	_ "github.com/containerd/containerd/runtime/v2/kata-direct"
-	_ "github.com/containerd/containerd/snapshots/blockfile/plugin"
-	_ "github.com/containerd/containerd/snapshots/native/plugin"
-	_ "github.com/containerd/containerd/snapshots/overlay/plugin"
+	"context"
+
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+// RuntimeConfig returns configuration information of the runtime.
+func (c *criService) RuntimeConfig(ctx context.Context, r *runtime.RuntimeConfigRequest) (*runtime.RuntimeConfigResponse, error) {
+	// Return runtime configuration
+	// For now, we return an empty response as the configuration is static
+	return &runtime.RuntimeConfigResponse{}, nil
+}
