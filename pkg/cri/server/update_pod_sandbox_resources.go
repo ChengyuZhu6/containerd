@@ -1,12 +1,9 @@
 /*
    Copyright The containerd Authors.
-
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at
-
        http://www.apache.org/licenses/LICENSE-2.0
-
    Unless required by applicable law or agreed to in writing, software
    distributed under the License is distributed on an "AS IS" BASIS,
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,15 +11,19 @@
    limitations under the License.
 */
 
-package builtins
+package server
 
 import (
-	_ "github.com/containerd/containerd/api/types/runc/options"
-	_ "github.com/containerd/containerd/metrics/cgroups"
-	_ "github.com/containerd/containerd/metrics/cgroups/v2"
-	_ "github.com/containerd/containerd/runtime/v1/linux"
-	_ "github.com/containerd/containerd/runtime/v2/kata-direct"
-	_ "github.com/containerd/containerd/snapshots/blockfile/plugin"
-	_ "github.com/containerd/containerd/snapshots/native/plugin"
-	_ "github.com/containerd/containerd/snapshots/overlay/plugin"
+	"context"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+// UpdatePodSandboxResources updates the pod sandbox resources.
+func (c *criService) UpdatePodSandboxResources(ctx context.Context, r *runtime.UpdatePodSandboxResourcesRequest) (*runtime.UpdatePodSandboxResourcesResponse, error) {
+	// This is a best-effort operation
+	// For now, return unimplemented as this requires deeper integration with cgroup management
+	return nil, status.Errorf(codes.Unimplemented, "method UpdatePodSandboxResources not implemented")
+}
