@@ -29,6 +29,9 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 			}
 		}
 
+		// Wait for IO to finish
+		c.ioWg.Wait()
+
 		if _, err := s.sandbox.DeleteContainer(ctx, c.id); err != nil {
 			serviceLog.WithError(err).Warn("failed to delete container")
 		}
@@ -36,6 +39,8 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 		c.status = task.Status_STOPPED
 		c.exitTime = time.Now()
 		c.exit = 128 + uint32(unix.SIGKILL)
+		// Wait for IO to finish for sandbox container too
+		c.ioWg.Wait()
 	}
 
 	if err := katautils.PostStopHooks(ctx, *c.spec, s.sandbox.ID(), c.bundle); err != nil {

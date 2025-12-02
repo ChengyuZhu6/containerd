@@ -69,6 +69,11 @@ type container struct {
 	exitTime time.Time
 	mounted  bool
 	cType    vc.ContainerType
+	stdin    string
+	stdout   string
+	stderr   string
+	terminal bool
+	ioWg     sync.WaitGroup
 }
 
 func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func(), opts *serviceOptions) (shim.Shim, error) {
