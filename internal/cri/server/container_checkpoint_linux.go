@@ -61,7 +61,7 @@ import (
 
 // checkIfCheckpointOCIImage returns checks if the input refers to a checkpoint image.
 // It returns the StorageImageID of the image the input resolves to, nil otherwise.
-func (c *criService) checkIfCheckpointOCIImage(ctx context.Context, input string) (string, error) {
+func (c *criService) checkIfCheckpointOCIImage(ctx context.Context, input string, snapshotter string) (string, error) {
 	if input == "" {
 		return "", nil
 	}
@@ -69,7 +69,7 @@ func (c *criService) checkIfCheckpointOCIImage(ctx context.Context, input string
 		return "", nil
 	}
 
-	image, err := c.LocalResolve(input)
+	image, err := c.LocalResolve(input, snapshotter)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve image %q: %w", input, err)
 	}
@@ -124,7 +124,7 @@ func (c *criService) CRImportCheckpoint(
 	createAnnotations := meta.Config.Annotations
 	createLabels := meta.Config.Labels
 
-	restoreStorageImageID, err := c.checkIfCheckpointOCIImage(ctx, inputImage)
+	restoreStorageImageID, err := c.checkIfCheckpointOCIImage(ctx, inputImage, "")
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +322,7 @@ func (c *criService) CRImportCheckpoint(
 		// checkpoint archive as NAME@DIGEST. The checkpoint archive also contains
 		// the tag with which it was initially pulled.
 		// First step is to pull NAME@DIGEST
-		containerdImage, err = c.client.Pull(ctx, config.RootfsImageRef)
+		containerdImage, err = c.client.Pull(ctx, config.RootfsImageRef, client.WithPullUnpack)
 		if err != nil {
 			return "", fmt.Errorf("failed to pull checkpoint base image %s: %w", config.RootfsImageRef, err)
 		}
@@ -488,7 +488,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	if state != runtime.ContainerState_CONTAINER_RUNNING {
 		return nil, fmt.Errorf(
 			"container %q is in %s state. only %s containers can be checkpointed",
-			r.GetContainerId(),
+			container.ID,
 			criContainerStateToString(state),
 			criContainerStateToString(runtime.ContainerState_CONTAINER_RUNNING),
 		)
@@ -515,11 +515,11 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 
 	task, err := container.Container.Task(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get task for container %q: %w", r.GetContainerId(), err)
+		return nil, fmt.Errorf("failed to get task for container %q: %w", container.ID, err)
 	}
-	img, err := task.Checkpoint(ctx, []client.CheckpointTaskOpts{withCheckpointOpts(i.Runtime.Name, c.getContainerRootDir(r.GetContainerId()))}...)
+	img, err := task.Checkpoint(ctx, []client.CheckpointTaskOpts{withCheckpointOpts(i.Runtime.Name, c.getContainerRootDir(container.ID))}...)
 	if err != nil {
-		return nil, fmt.Errorf("checkpointing container %q failed: %w", r.GetContainerId(), err)
+		return nil, fmt.Errorf("checkpointing container %q failed: %w", container.ID, err)
 	}
 
 	// the checkpoint image has been provided as an index with manifests representing the tar of criu data, the rw layer, and the config
@@ -542,7 +542,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 		return nil, fmt.Errorf("failed to unmarshall blob into checkpoint data OCI index: %w", err)
 	}
 
-	cpPath := filepath.Join(c.getContainerRootDir(r.GetContainerId()), "ctrd-checkpoint")
+	cpPath := filepath.Join(c.getContainerRootDir(container.ID), "ctrd-checkpoint")
 	if err := os.MkdirAll(cpPath, 0o700); err != nil {
 		return nil, err
 	}
@@ -551,7 +551,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	// This internal containerd file is used by checkpointctl for
 	// checkpoint archive analysis.
 	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(r.GetContainerId()), crmetadata.StatusFile),
+		filepath.Join(c.getContainerRootDir(container.ID), crmetadata.StatusFile),
 		filepath.Join(cpPath, crmetadata.StatusFile),
 		0o600,
 	); err != nil {
@@ -561,7 +561,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	// This file is created by CRIU and includes timing analysis.
 	// Also used by checkpointctl
 	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(r.GetContainerId()), stats.StatsDump),
+		filepath.Join(c.getContainerRootDir(container.ID), stats.StatsDump),
 		filepath.Join(cpPath, stats.StatsDump),
 		0o600,
 	); err != nil {
@@ -571,7 +571,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 	// The log file created by CRIU. This file could be missing.
 	// Let's ignore errors if the file is missing.
 	if err := c.os.CopyFile(
-		filepath.Join(c.getContainerRootDir(r.GetContainerId()), crmetadata.DumpLogFile),
+		filepath.Join(c.getContainerRootDir(container.ID), crmetadata.DumpLogFile),
 		filepath.Join(cpPath, crmetadata.DumpLogFile),
 		0o600,
 	); err != nil {
@@ -645,7 +645,7 @@ func (c *criService) CheckpointContainer(ctx context.Context, r *runtime.Checkpo
 
 	containerCheckpointTimer.WithValues(i.Runtime.Name).UpdateSince(start)
 
-	log.G(ctx).Infof("Wrote checkpoint archive to %s for %s", outFile.Name(), r.GetContainerId())
+	log.G(ctx).Infof("Wrote checkpoint archive to %s for %s", outFile.Name(), container.ID)
 
 	return &runtime.CheckpointContainerResponse{}, nil
 }
