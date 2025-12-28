@@ -260,6 +260,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 		containerd.WithUnpackOpts([]containerd.UnpackOpt{
 			containerd.WithUnpackDuplicationSuppressor(c.unpackDuplicationSuppressor),
 			containerd.WithUnpackApplyOpts(diff.WithSyncFs(c.config.ImagePullWithSyncFs)),
+			containerd.WithUnpackContentIntegrityCheck(c.shouldCheckSnapshotterIntegrity(snapshotter)),
 		}),
 	}
 
@@ -1047,4 +1048,31 @@ func (reporter *transferProgressReporter) createProgressFunc(ctx context.Context
 			return
 		}
 	}
+}
+
+func (c *CRIImageService) shouldCheckSnapshotterIntegrity(snapshotter string) bool {
+	// 1. Check Includes
+	for _, s := range c.config.SnapshotterIntegrityIncludes {
+		if s == snapshotter {
+			return true
+		}
+	}
+
+	// 2. Check Excludes
+	for _, s := range c.config.SnapshotterIntegrityExcludes {
+		if s == snapshotter {
+			return false
+		}
+	}
+
+	// 3. Default policy
+	// Local snapshotters: default ON
+	localSnapshotters := []string{"overlayfs", "native", "devmapper", "btrfs", "zfs"}
+	for _, s := range localSnapshotters {
+		if s == snapshotter {
+			return true
+		}
+	}
+
+	return false
 }

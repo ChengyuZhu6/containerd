@@ -339,6 +339,14 @@ type ImageConfig struct {
 	// TODO: Migrate to transfer service
 	ImagePullWithSyncFs bool `toml:"image_pull_with_sync_fs" json:"imagePullWithSyncFs"`
 
+	// SnapshotterIntegrityIncludes is a list of snapshotters that must enforce content integrity checks.
+	// When a snapshot exists, it ensures the content blob also exists in the content store, downloading it if missing.
+	SnapshotterIntegrityIncludes []string `toml:"snapshotter_integrity_includes" json:"snapshotterIntegrityIncludes"`
+
+	// SnapshotterIntegrityExcludes is a list of snapshotters that must skip content integrity checks.
+	// This overrides the default behavior or automatic detection.
+	SnapshotterIntegrityExcludes []string `toml:"snapshotter_integrity_excludes" json:"snapshotterIntegrityExcludes"`
+
 	// StatsCollectPeriod is the period (in seconds) of snapshots stats collection.
 	StatsCollectPeriod int `toml:"stats_collect_period" json:"statsCollectPeriod"`
 

@@ -90,6 +90,9 @@ type Platform struct {
 	// LayerTypes are the supported types to be considered layers
 	// Defaults to OCI image layers
 	LayerTypes []string
+
+	// CheckContentIntegrity enables verification of content blob existence even if snapshot exists.
+	CheckContentIntegrity bool
 }
 
 // KeyedLocker is an interface for managing job duplication by
@@ -150,6 +153,18 @@ func WithDuplicationSuppressor(d KeyedLocker) UnpackerOpt {
 func WithUnpackLimiter(l Limiter) UnpackerOpt {
 	return UnpackerOpt(func(c *unpackerConfig) error {
 		c.unpackLimiter = l
+		return nil
+	})
+}
+
+// WithSnapshotterIntegrityCheck configures whether to check content integrity for a specific snapshotter.
+func WithSnapshotterIntegrityCheck(snapshotter string, check bool) UnpackerOpt {
+	return UnpackerOpt(func(c *unpackerConfig) error {
+		for _, p := range c.platforms {
+			if p.SnapshotterKey == snapshotter {
+				p.CheckContentIntegrity = check
+			}
+		}
 		return nil
 	})
 }
@@ -417,6 +432,16 @@ func (u *Unpacker) unpack(
 						// Try again, this should be rare, log it
 						log.G(ctx).WithField("key", key).WithField("chainid", chainID).Debug("extraction snapshot already exists, chain id not found")
 					} else {
+						if unpack.CheckContentIntegrity {
+							if _, err := cs.Info(ctx, desc.Digest); errdefs.IsNotFound(err) {
+								log.G(ctx).WithField("digest", desc.Digest).Infof("content missing for existing snapshot %s, fetching synchronously", chainID)
+								if err := u.fetch(ctx, h, []ocispec.Descriptor{desc}, nil); err != nil {
+									return nil, fmt.Errorf("failed to fetch missing content for snapshot %s: %w", chainID, err)
+								}
+							} else if err != nil {
+								return nil, fmt.Errorf("failed to check content info: %w", err)
+							}
+						}
 						log.G(ctx).Debugf("snapshot %s with chainID %s already exists skip fetch blob %q ", snInfo.Name, chainID, desc.Digest)
 						// no need to handle, snapshot now found with chain id
 						return nil, nil
