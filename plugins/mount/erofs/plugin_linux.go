@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/plugin/registry"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/fsmount"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/errdefs"
 
@@ -117,7 +118,7 @@ func (erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string, _ 
 }
 
 func doMount(m mount.Mount, target string) error {
-	if err := mount.Fsmount(m, target); err != nil {
+	if err := fsmount.Fsmount(m, target); err != nil {
 		// Fall back to traditional mount() if fsmount syscall not available (Linux < 5.2)
 		if errors.Is(err, unix.ENOSYS) {
 			log.L.WithError(err).Debug("fsmount not available, falling back to traditional mount")

@@ -14,7 +14,7 @@
    limitations under the License.
 */
 
-package mount
+package fsmount
 
 import (
 	"fmt"
@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/containerd/containerd/v2/core/mount"
 )
 
 var mountAttrFlags = map[string]struct {
@@ -81,7 +83,7 @@ func SupportsFsmount() bool {
 // Fsmount mounts the filesystem using the new mount API (fsopen/fsconfig/fsmount/move_mount).
 // This approach avoids the PAGE_SIZE limitation of traditional mount() syscall by setting
 // options individually via fsconfig() instead of passing them as a single string.
-func Fsmount(m Mount, target string) error {
+func Fsmount(m mount.Mount, target string) error {
 	fsctx, err := Fsopen(m.Type, 0)
 	if err != nil {
 		return err

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/fsmount"
 	"github.com/containerd/containerd/v2/pkg/testutil"
 	snapshotserofs "github.com/containerd/containerd/v2/plugins/snapshots/erofs"
 	"golang.org/x/sys/unix"
@@ -42,7 +43,7 @@ func TestFsmountLoopDevice(t *testing.T) {
 		t.Skip("erofs kernel support not available")
 	}
 
-	if !mount.SupportsFsmount() {
+	if !fsmount.SupportsFsmount() {
 		t.Skip("fsmount syscall not available (requires Linux 5.2+)")
 	}
 
@@ -86,7 +87,7 @@ func TestFsmountLoopDevice(t *testing.T) {
 		Options: []string{"ro"},
 	}
 
-	err = mount.Fsmount(m, mountPoint)
+	err = fsmount.Fsmount(m, mountPoint)
 	if err != nil {
 		t.Fatalf("fsmount with loop device failed: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestMountOptionsPageSizeLimit(t *testing.T) {
 		t.Skip("erofs kernel support not available")
 	}
 
-	if !mount.SupportsFsmount() {
+	if !fsmount.SupportsFsmount() {
 		t.Skip("fsmount syscall not available (requires Linux 5.2+)")
 	}
 
@@ -197,7 +198,7 @@ func TestMountOptionsPageSizeLimit(t *testing.T) {
 			Options: []string{"ro"},
 		}
 
-		err := mount.Fsmount(simpleMount, mountPoint)
+		err := fsmount.Fsmount(simpleMount, mountPoint)
 		if err != nil {
 			if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
 				t.Skipf("fsmount failed due to permission restrictions: %v", err)
@@ -235,7 +236,7 @@ func TestMountOptionsPageSizeLimit(t *testing.T) {
 			Options: manyOptions,
 		}
 
-		err := mount.Fsmount(manyOptionsMount, mountPoint)
+		err := fsmount.Fsmount(manyOptionsMount, mountPoint)
 		if err != nil {
 			if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
 				t.Skipf("fsmount failed due to permission restrictions: %v", err)
