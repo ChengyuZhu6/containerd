@@ -30,7 +30,7 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 		return nil, fmt.Errorf("failed to get container type: %w", err)
 	}
 
-	serviceLog.WithField("type", containerType).WithField("id", r.ID).Info("creating container")
+	s.log.WithField("type", containerType).WithField("id", r.ID).Info("creating container")
 
 	rootFs := vc.RootFs{}
 	if len(r.Rootfs) > 0 {
@@ -71,7 +71,7 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 		exitIOch: make(chan struct{}),
 	}
 
-	serviceLog.WithField("container", r.ID).
+	s.log.WithField("container", r.ID).
 		WithField("stdin", r.Stdin).
 		WithField("stdout", r.Stdout).
 		WithField("stderr", r.Stderr).
@@ -118,7 +118,7 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 		if configPath == "" {
 			configPath = s.configPath
 		}
-		serviceLog.WithField("config", configPath).Info("loading kata configuration")
+		s.log.WithField("config", configPath).Info("loading kata configuration")
 
 		_, runtimeConfig, err := katautils.LoadConfiguration(configPath, false)
 		if err != nil {
@@ -129,7 +129,7 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 
 	s.config.SandboxCPUs, s.config.SandboxMemMB = oci.CalculateSandboxSizing(ociSpec)
 
-	serviceLog.WithField("cpus", s.config.SandboxCPUs).
+	s.log.WithField("cpus", s.config.SandboxCPUs).
 		WithField("memory_mb", s.config.SandboxMemMB).
 		Info("sandbox sizing calculated")
 
@@ -157,11 +157,11 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 
 	pid, err := sandbox.GetHypervisorPid()
 	if err != nil {
-		serviceLog.WithError(err).Warn("failed to get hypervisor pid")
+		s.log.WithError(err).Warn("failed to get hypervisor pid")
 		s.hpid = uint32(os.Getpid())
 	} else {
 		s.hpid = uint32(pid)
-		serviceLog.WithField("hypervisor_pid", pid).Info("hypervisor started")
+		s.log.WithField("hypervisor_pid", pid).Info("hypervisor started")
 	}
 
 	return nil

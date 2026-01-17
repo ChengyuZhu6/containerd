@@ -34,10 +34,21 @@ var (
 	_     taskAPI.TaskService = (*service)(nil)
 )
 
-var serviceLog = logrus.WithFields(logrus.Fields{
-	"source": "kata-direct",
-	"name":   "kata-direct-runtime",
-})
+// Global logger initialization - only done once to avoid race conditions
+var (
+	globalLoggerOnce sync.Once
+	globalLogger     *logrus.Entry
+)
+
+func getGlobalLogger() *logrus.Entry {
+	globalLoggerOnce.Do(func() {
+		globalLogger = logrus.WithFields(logrus.Fields{
+			"source": "kata-direct",
+			"name":   "kata-direct-runtime",
+		})
+	})
+	return globalLogger
+}
 
 type serviceOptions struct {
 	configPath string
@@ -59,6 +70,7 @@ type service struct {
 	exitCh     chan struct{}
 	cleaned    bool
 	configPath string
+	log        *logrus.Entry // per-service logger
 }
 
 type container struct {
@@ -88,8 +100,20 @@ type container struct {
 	exitIOch chan struct{} // Channel to signal IO streams closed
 }
 
-func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func(), opts *serviceOptions) (shim.Shim, error) {
-	serviceLog = serviceLog.WithFields(logrus.Fields{
+// Global virtcontainers initialization - only done once
+var vcLoggerOnce sync.Once
+
+func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func(), opts *serviceOptions) (_ shim.Shim, retErr error) {
+	fmt.Fprintf(os.Stderr, "[kata-direct] New service called for id=%s\n", id)
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("New service panic: %v", r)
+			fmt.Fprintf(os.Stderr, "[kata-direct] New service panic: %v\n", r)
+		}
+	}()
+
+	// Create per-service logger with sandbox-specific fields
+	log := getGlobalLogger().WithFields(logrus.Fields{
 		"sandbox": id,
 		"pid":     os.Getpid(),
 	})
@@ -104,14 +128,23 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 	}
 
 	vci := &vc.VCImpl{}
-	vci.SetLogger(ctx, serviceLog)
-	katautils.SetLogger(ctx, serviceLog, serviceLog.Logger.Level)
+	// Initialize global virtcontainers logger only once with a generic logger
+	// IMPORTANT: Use getGlobalLogger() (without sandbox ID) for global vc/katautils loggers
+	// Using a sandbox-specific logger here would cause state leakage between sandboxes
+	// because katautils.SetLogger sets a package-level global logger that persists
+	// across sandbox lifecycles.
+	vcLoggerOnce.Do(func() {
+		globalLog := getGlobalLogger()
+		vci.SetLogger(ctx, globalLog)
+		katautils.SetLogger(ctx, globalLog, globalLog.Logger.Level)
+	})
 
-	ctx, cancel := context.WithCancel(ctx)
+	// Use independent context for service lifecycle, not tied to request context
+	svcCtx, cancel := context.WithCancel(context.Background())
 
 	s := &service{
 		vci:        vci,
-		ctx:        ctx,
+		ctx:        svcCtx,
 		cancel:     cancel,
 		namespace:  ns,
 		id:         id,
@@ -120,11 +153,12 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 		publisher:  publisher,
 		exitCh:     make(chan struct{}),
 		configPath: opts.configPath,
+		log:        log,
 	}
 
 	go s.forwardEvents()
 
-	serviceLog.Info("kata-direct service created (no shim process)")
+	s.log.Info("kata-direct service created (no shim process)")
 
 	return s, nil
 }
@@ -132,7 +166,7 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 func (s *service) forwardEvents() {
 	defer func() {
 		if r := recover(); r != nil {
-			serviceLog.WithField("panic", r).Error("event forwarder panic recovered")
+			s.log.WithField("panic", r).Error("event forwarder panic recovered")
 		}
 	}()
 
@@ -142,9 +176,9 @@ func (s *service) forwardEvents() {
 			if evt == nil {
 				return
 			}
-			topic := getTopic(evt)
+			topic := getTopic(s, evt)
 			if err := s.publisher.Publish(s.ctx, topic, evt); err != nil {
-				serviceLog.WithError(err).WithField("topic", topic).Warn("failed to publish event")
+				s.log.WithError(err).WithField("topic", topic).Warn("failed to publish event")
 			}
 		case <-s.exitCh:
 			return
@@ -154,7 +188,7 @@ func (s *service) forwardEvents() {
 	}
 }
 
-func getTopic(e interface{}) string {
+func getTopic(s *service, e interface{}) string {
 	switch e.(type) {
 	case *eventstypes.TaskCreate:
 		return cdruntime.TaskCreateEventTopic
@@ -175,24 +209,24 @@ func getTopic(e interface{}) string {
 	case *eventstypes.TaskResumed:
 		return cdruntime.TaskResumedEventTopic
 	default:
-		serviceLog.WithField("event-type", e).Warn("no topic for event type")
+		s.log.WithField("event-type", e).Warn("no topic for event type")
 	}
 	return cdruntime.TaskUnknownTopic
 }
 
 func (s *service) StartShim(ctx context.Context, opts shim.StartOpts) (string, error) {
-	serviceLog.Info("StartShim called - kata-direct mode (no actual shim process)")
+	s.log.Info("StartShim called - kata-direct mode (no actual shim process)")
 	return fmt.Sprintf("kata-direct://%s", s.id), nil
 }
 
 func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) {
-	serviceLog.Info("Cleanup called")
+	s.log.Info("Cleanup called")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.cleaned {
-		serviceLog.Debug("Cleanup invoked after already completed")
+		s.log.Debug("Cleanup invoked after already completed")
 		return &taskAPI.DeleteResponse{
 			ExitedAt:   timestamppb.New(time.Now()),
 			ExitStatus: 0,
@@ -204,10 +238,10 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 
 	if s.sandbox != nil {
 		if err := s.sandbox.Stop(ctx, false); err != nil {
-			serviceLog.WithError(err).Warn("failed to stop sandbox during cleanup")
+			s.log.WithError(err).Warn("failed to stop sandbox during cleanup")
 		}
 		if err := s.sandbox.Delete(ctx); err != nil {
-			serviceLog.WithError(err).Warn("failed to delete sandbox during cleanup")
+			s.log.WithError(err).Warn("failed to delete sandbox during cleanup")
 		}
 	}
 
@@ -220,8 +254,8 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 }
 
 func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*taskAPI.CreateTaskResponse, error) {
-	serviceLog.WithField("container", r.ID).Info("Create() start")
-	defer serviceLog.WithField("container", r.ID).Info("Create() end")
+	s.log.WithField("container", r.ID).Info("Create() start")
+	defer s.log.WithField("container", r.ID).Info("Create() end")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,7 +269,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				serviceLog.WithField("panic", r).Error("Create panic recovered")
+				s.log.WithField("panic", r).Error("Create panic recovered")
 				resultCh <- Result{nil, fmt.Errorf("create panic: %v", r)}
 			}
 		}()
@@ -277,8 +311,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 }
 
 func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.StartResponse, error) {
-	serviceLog.WithField("container", r.ID).Info("Start() start")
-	defer serviceLog.WithField("container", r.ID).Info("Start() end")
+	s.log.WithField("container", r.ID).Info("Start() start")
+	defer s.log.WithField("container", r.ID).Info("Start() end")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,7 +326,7 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				serviceLog.WithField("panic", r).Error("Start panic recovered")
+				s.log.WithField("panic", r).Error("Start panic recovered")
 				errCh <- fmt.Errorf("start panic: %v", r)
 			}
 		}()
@@ -320,8 +354,8 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 }
 
 func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAPI.DeleteResponse, error) {
-	serviceLog.WithField("container", r.ID).Info("Delete() start")
-	defer serviceLog.WithField("container", r.ID).Info("Delete() end")
+	s.log.WithField("container", r.ID).Info("Delete() start")
+	defer s.log.WithField("container", r.ID).Info("Delete() end")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,7 +369,7 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				serviceLog.WithField("panic", r).Error("Delete panic recovered")
+				s.log.WithField("panic", r).Error("Delete panic recovered")
 				errCh <- fmt.Errorf("delete panic: %v", r)
 			}
 		}()
@@ -392,7 +426,7 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 }
 
 func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Empty, error) {
-	serviceLog.WithField("container", r.ID).WithField("signal", r.Signal).Info("Kill()")
+	s.log.WithField("container", r.ID).WithField("signal", r.Signal).Info("Kill()")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -410,7 +444,7 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				serviceLog.WithField("panic", r).Error("Kill panic recovered")
+				s.log.WithField("panic", r).Error("Kill panic recovered")
 				errCh <- fmt.Errorf("kill panic: %v", r)
 			}
 		}()
@@ -523,7 +557,7 @@ func (s *service) CloseIO(ctx context.Context, r *taskAPI.CloseIORequest) (*empt
 	// Close stdin if it exists
 	if c.stdinCloser != nil {
 		if err := c.stdinCloser.Close(); err != nil {
-			serviceLog.WithError(err).WithField("container", r.ID).Warn("failed to close stdin")
+			s.log.WithError(err).WithField("container", r.ID).Warn("failed to close stdin")
 		}
 		c.stdinCloser = nil
 	}
@@ -540,7 +574,7 @@ func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*em
 }
 
 func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.WaitResponse, error) {
-	serviceLog.WithField("container", r.ID).Debug("Wait() called")
+	s.log.WithField("container", r.ID).Debug("Wait() called")
 
 	s.mu.Lock()
 	c, ok := s.containers[r.ID]
@@ -553,7 +587,7 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 	if c.status == task.Status_STOPPED && !c.exitTime.IsZero() {
 		exitedAt := timestamppb.New(c.exitTime)
 		s.mu.Unlock()
-		serviceLog.WithField("container", r.ID).WithField("exit", c.exit).Debug("Wait() returning cached exit status")
+		s.log.WithField("container", r.ID).WithField("exit", c.exit).Debug("Wait() returning cached exit status")
 		return &taskAPI.WaitResponse{
 			ExitStatus: c.exit,
 			ExitedAt:   exitedAt,
@@ -569,7 +603,7 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 		return nil, fmt.Errorf("container %s exit channel not initialized", r.ID)
 	}
 
-	serviceLog.WithField("container", r.ID).Debug("Wait() waiting on exitCh")
+	s.log.WithField("container", r.ID).Debug("Wait() waiting on exitCh")
 
 	// Wait for exit code from channel (populated by background waiter)
 	var ret uint32
@@ -581,7 +615,7 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 		return nil, ctx.Err()
 	}
 
-	serviceLog.WithField("container", r.ID).WithField("exit", ret).Debug("Wait() got exit code from channel")
+	s.log.WithField("container", r.ID).WithField("exit", ret).Debug("Wait() got exit code from channel")
 
 	s.mu.Lock()
 	exitedAt := timestamppb.New(c.exitTime)
