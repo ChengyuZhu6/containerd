@@ -6,7 +6,10 @@ package katadirect
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"github.com/containerd/containerd/events/exchange"
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
@@ -16,6 +19,15 @@ import (
 	"github.com/containerd/typeurl/v2"
 )
 
+var ignoreSIGHUPOnce sync.Once
+
+func ignoreSIGHUP() {
+	ignoreSIGHUPOnce.Do(func() {
+		signal.Ignore(syscall.SIGHUP)
+		fmt.Fprintf(os.Stderr, "[kata-direct] SIGHUP signal ignored to protect containerd from PTY closure\n")
+	})
+}
+
 func init() {
 	plugin.Register(&plugin.Registration{
 		Type: plugin.RuntimePluginV2,
@@ -24,6 +36,9 @@ func init() {
 			plugin.EventPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+
+			ignoreSIGHUP()
+
 			ep, err := ic.GetByID(plugin.EventPlugin, "exchange")
 			if err != nil {
 				return nil, err
