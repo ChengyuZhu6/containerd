@@ -88,7 +88,9 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 		}
 
 	case vc.PodContainer:
-		if s.sandbox == nil {
+		// Use getSandbox() to safely access sandbox under RLock
+		sandbox := s.getSandbox()
+		if sandbox == nil {
 			if rootFs.Mounted {
 				mount.UnmountAll(rootfs, 0)
 			}
@@ -113,6 +115,8 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 }
 
 func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociSpec *specs.Spec, rootFs vc.RootFs) error {
+	// Load configuration under lock to avoid data race
+	s.mu.Lock()
 	if s.config == nil {
 		configPath := oci.GetSandboxConfigPath(ociSpec.Annotations)
 		if configPath == "" {
@@ -122,15 +126,19 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 
 		_, runtimeConfig, err := katautils.LoadConfiguration(configPath, false)
 		if err != nil {
+			s.mu.Unlock()
 			return fmt.Errorf("failed to load kata configuration: %w", err)
 		}
 		s.config = &runtimeConfig
 	}
 
 	s.config.SandboxCPUs, s.config.SandboxMemMB = oci.CalculateSandboxSizing(ociSpec)
+	// Copy config for use outside lock
+	configCopy := *s.config
+	s.mu.Unlock()
 
-	s.log.WithField("cpus", s.config.SandboxCPUs).
-		WithField("memory_mb", s.config.SandboxMemMB).
+	s.log.WithField("cpus", configCopy.SandboxCPUs).
+		WithField("memory_mb", configCopy.SandboxMemMB).
 		Info("sandbox sizing calculated")
 
 	// Use context.Background() for sandbox creation because:
@@ -138,11 +146,14 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 	// 2. The request context (ctx) will be cancelled when the Create RPC completes
 	// 3. Long-running operations like readProcessStdout use k.ctx which comes from sandbox.ctx
 	// Using request context would cause "context canceled" errors when reading container output
+	//
+	// NOTE: This is a long-running operation performed WITHOUT holding the lock
+	// to allow concurrent read operations (State, Pids, etc.)
 	sandbox, _, err := katautils.CreateSandbox(
 		context.Background(),
 		s.vci,
 		*ociSpec,
-		*s.config,
+		configCopy,
 		rootFs,
 		id,
 		bundlePath,
@@ -153,6 +164,30 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 		return fmt.Errorf("failed to create kata sandbox: %w", err)
 	}
 
+	// CRITICAL FIX: Acquire lock to safely assign sandbox and check for cleanup race condition
+	// This prevents data race with Cleanup() and other methods that access s.sandbox/s.hpid
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check for race condition: if Cleanup() was called during sandbox creation,
+	// we must destroy the newly created sandbox to prevent resource leakage
+	if s.cleaned {
+		s.log.Warn("service cleanup triggered during sandbox creation, destroying orphan sandbox")
+		// Destroy the orphan sandbox in background to avoid blocking
+		go func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+			defer cancel()
+			if err := sandbox.Stop(cleanupCtx, true); err != nil {
+				s.log.WithError(err).Error("failed to stop orphan sandbox")
+			}
+			if err := sandbox.Delete(cleanupCtx); err != nil {
+				s.log.WithError(err).Error("failed to delete orphan sandbox")
+			}
+		}()
+		return fmt.Errorf("service cleanup triggered during sandbox creation")
+	}
+
+	// Safe to assign now - we hold the lock and cleanup hasn't been triggered
 	s.sandbox = sandbox
 
 	pid, err := sandbox.GetHypervisorPid()
@@ -168,11 +203,17 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 }
 
 func (s *service) createPodContainer(ctx context.Context, id, bundlePath string, ociSpec *specs.Spec, rootFs vc.RootFs) error {
+	// Safely get sandbox reference under lock
+	sandbox := s.getSandbox()
+	if sandbox == nil {
+		return fmt.Errorf("sandbox not found for container %s", id)
+	}
+
 	// Use context.Background() for container creation to be consistent with sandbox creation
 	// This ensures long-running operations don't get cancelled when the request completes
 	_, err := katautils.CreateContainer(
 		context.Background(),
-		s.sandbox,
+		sandbox,
 		*ociSpec,
 		rootFs,
 		id,

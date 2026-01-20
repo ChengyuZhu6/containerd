@@ -29,6 +29,12 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
+// Default timeouts for various operations
+const (
+	defaultOperationTimeout = 30 * time.Second
+	defaultCleanupTimeout   = 10 * time.Second
+)
+
 var (
 	empty                     = &emptypb.Empty{}
 	_     taskAPI.TaskService = (*service)(nil)
@@ -55,7 +61,7 @@ type serviceOptions struct {
 }
 
 type service struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex // Changed to RWMutex for better read concurrency
 	vci        vc.VC
 	sandbox    vc.VCSandbox
 	config     *oci.RuntimeConfig
@@ -102,6 +108,40 @@ type container struct {
 
 // Global virtcontainers initialization - only done once
 var vcLoggerOnce sync.Once
+
+// getSandbox safely returns the current sandbox reference (read-only access)
+func (s *service) getSandbox() vc.VCSandbox {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sandbox
+}
+
+// setSandbox safely sets the sandbox reference
+func (s *service) setSandbox(sandbox vc.VCSandbox) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sandbox = sandbox
+}
+
+// clearSandbox safely clears the sandbox reference
+func (s *service) clearSandbox() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sandbox = nil
+}
+
+// withOperationTimeout wraps a context with the default operation timeout if no deadline is set
+func withOperationTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultOperationTimeout)
+}
+
+// withCleanupTimeout creates a context with cleanup timeout
+func withCleanupTimeout() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), defaultCleanupTimeout)
+}
 
 func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func(), opts *serviceOptions) (_ shim.Shim, retErr error) {
 	fmt.Fprintf(os.Stderr, "[kata-direct] New service called for id=%s\n", id)
@@ -257,8 +297,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	s.log.WithField("container", r.ID).Info("Create() start")
 	defer s.log.WithField("container", r.ID).Info("Create() end")
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Check if service is already cleaned up before starting
+	s.mu.RLock()
+	if s.cleaned {
+		s.mu.RUnlock()
+		return nil, fmt.Errorf("service already cleaned up")
+	}
+	s.mu.RUnlock()
 
 	type Result struct {
 		container *container
@@ -266,6 +311,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 	resultCh := make(chan Result, 1)
 
+	// NOTE: Do NOT hold the lock while calling createContainer
+	// because createSandbox (called by createContainer) needs to acquire the lock
+	// to safely assign s.sandbox and s.hpid
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -286,9 +334,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return nil, res.err
 		}
 
+		// Acquire lock to update container map and get hpid
+		s.mu.Lock()
 		container := res.container
 		container.status = task.Status_CREATED
 		s.containers[r.ID] = container
+		hpid := s.hpid
+		s.mu.Unlock()
 
 		s.events <- &eventstypes.TaskCreate{
 			ContainerID: r.ID,
@@ -301,11 +353,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				Terminal: r.Terminal,
 			},
 			Checkpoint: r.Checkpoint,
-			Pid:        s.hpid,
+			Pid:        hpid,
 		}
 
 		return &taskAPI.CreateTaskResponse{
-			Pid: s.hpid,
+			Pid: hpid,
 		}, nil
 	}
 }
@@ -314,10 +366,12 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 	s.log.WithField("container", r.ID).Info("Start() start")
 	defer s.log.WithField("container", r.ID).Info("Start() end")
 
+	// Get container under lock, but release before calling startContainer
+	// to avoid deadlock (startContainer calls getSandbox which needs RLock)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	c, ok := s.containers[r.ID]
+	s.mu.Unlock()
+
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
@@ -357,10 +411,12 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 	s.log.WithField("container", r.ID).Info("Delete() start")
 	defer s.log.WithField("container", r.ID).Info("Delete() end")
 
+	// Get container under lock, but release before calling deleteContainer
+	// to avoid deadlock (deleteContainer calls getSandbox which needs RLock)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	c, ok := s.containers[r.ID]
+	s.mu.Unlock()
+
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
@@ -385,7 +441,10 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 			return nil, err
 		}
 
+		// Re-acquire lock to remove from map
+		s.mu.Lock()
 		delete(s.containers, r.ID)
+		s.mu.Unlock()
 
 		s.events <- &eventstypes.TaskDelete{
 			ContainerID: c.id,
@@ -403,8 +462,8 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 }
 
 func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.StateResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	c, ok := s.containers[r.ID]
 	if !ok {
@@ -428,17 +487,22 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Empty, error) {
 	s.log.WithField("container", r.ID).WithField("signal", r.Signal).Info("Kill()")
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	s.mu.RLock()
 	c, ok := s.containers[r.ID]
+	sandbox := s.sandbox
+	s.mu.RUnlock()
+
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
 
-	if s.sandbox == nil {
+	if sandbox == nil {
 		return nil, fmt.Errorf("sandbox not found")
 	}
+
+	// Add timeout if not already set
+	opCtx, cancel := withOperationTimeout(ctx)
+	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -449,15 +513,11 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 			}
 		}()
 
-		if c.cType.IsSandbox() {
-			errCh <- s.sandbox.KillContainer(ctx, c.id, syscall.Signal(r.Signal), r.All)
-		} else {
-			errCh <- s.sandbox.KillContainer(ctx, c.id, syscall.Signal(r.Signal), r.All)
-		}
+		errCh <- sandbox.KillContainer(opCtx, c.id, syscall.Signal(r.Signal), r.All)
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-opCtx.Done():
 		return nil, fmt.Errorf("kill container timeout: %v", r.ID)
 	case err := <-errCh:
 		if err != nil {
@@ -478,14 +538,15 @@ func (s *service) Pids(ctx context.Context, r *taskAPI.PidsRequest) (*taskAPI.Pi
 }
 
 func (s *service) Pause(ctx context.Context, r *taskAPI.PauseRequest) (*emptypb.Empty, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.sandbox == nil {
+	sandbox := s.getSandbox()
+	if sandbox == nil {
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
-	if err := s.sandbox.PauseContainer(ctx, r.ID); err != nil {
+	opCtx, cancel := withOperationTimeout(ctx)
+	defer cancel()
+
+	if err := sandbox.PauseContainer(opCtx, r.ID); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -497,14 +558,15 @@ func (s *service) Pause(ctx context.Context, r *taskAPI.PauseRequest) (*emptypb.
 }
 
 func (s *service) Resume(ctx context.Context, r *taskAPI.ResumeRequest) (*emptypb.Empty, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.sandbox == nil {
+	sandbox := s.getSandbox()
+	if sandbox == nil {
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
-	if err := s.sandbox.ResumeContainer(ctx, r.ID); err != nil {
+	opCtx, cancel := withOperationTimeout(ctx)
+	defer cancel()
+
+	if err := sandbox.ResumeContainer(opCtx, r.ID); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -520,10 +582,10 @@ func (s *service) Exec(ctx context.Context, r *taskAPI.ExecProcessRequest) (*emp
 }
 
 func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*emptypb.Empty, error) {
-	s.mu.Lock()
+	s.mu.RLock()
 	c, ok := s.containers[r.ID]
 	sandbox := s.sandbox
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
@@ -538,7 +600,10 @@ func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*
 		execID = c.id
 	}
 
-	if err := sandbox.WinsizeProcess(ctx, c.id, execID, r.Height, r.Width); err != nil {
+	opCtx, cancel := withOperationTimeout(ctx)
+	defer cancel()
+
+	if err := sandbox.WinsizeProcess(opCtx, c.id, execID, r.Height, r.Width); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -546,21 +611,23 @@ func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*
 }
 
 func (s *service) CloseIO(ctx context.Context, r *taskAPI.CloseIORequest) (*emptypb.Empty, error) {
-	s.mu.Lock()
+	s.mu.RLock()
 	c, ok := s.containers[r.ID]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
 
-	// Close stdin if it exists
+	// Close stdin if it exists - use container's ioMu for IO state
+	c.ioMu.Lock()
 	if c.stdinCloser != nil {
 		if err := c.stdinCloser.Close(); err != nil {
 			s.log.WithError(err).WithField("container", r.ID).Warn("failed to close stdin")
 		}
 		c.stdinCloser = nil
 	}
+	c.ioMu.Unlock()
 
 	return empty, nil
 }
@@ -576,20 +643,21 @@ func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*em
 func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.WaitResponse, error) {
 	s.log.WithField("container", r.ID).Debug("Wait() called")
 
-	s.mu.Lock()
+	s.mu.RLock()
 	c, ok := s.containers[r.ID]
 	if !ok {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
 
 	// If already stopped, return cached status
 	if c.status == task.Status_STOPPED && !c.exitTime.IsZero() {
 		exitedAt := timestamppb.New(c.exitTime)
-		s.mu.Unlock()
-		s.log.WithField("container", r.ID).WithField("exit", c.exit).Debug("Wait() returning cached exit status")
+		exitCode := c.exit
+		s.mu.RUnlock()
+		s.log.WithField("container", r.ID).WithField("exit", exitCode).Debug("Wait() returning cached exit status")
 		return &taskAPI.WaitResponse{
-			ExitStatus: c.exit,
+			ExitStatus: exitCode,
 			ExitedAt:   exitedAt,
 		}, nil
 	}
@@ -597,7 +665,7 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 	// Get the exit channel - this is how kata-shim-v2 does it
 	// Wait on the exitCh instead of directly calling WaitProcess
 	exitCh := c.exitCh
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if exitCh == nil {
 		return nil, fmt.Errorf("container %s exit channel not initialized", r.ID)
@@ -617,9 +685,9 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 
 	s.log.WithField("container", r.ID).WithField("exit", ret).Debug("Wait() got exit code from channel")
 
-	s.mu.Lock()
+	s.mu.RLock()
 	exitedAt := timestamppb.New(c.exitTime)
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	return &taskAPI.WaitResponse{
 		ExitStatus: ret,

@@ -63,6 +63,7 @@ func init() {
 			// Return a factory that will create services on demand
 			return &taskServiceFactory{
 				publisher: publisher,
+				services:  make(map[string]shim.Shim),
 			}, nil
 		},
 	})
@@ -82,7 +83,9 @@ var _ shim.Publisher = (*publisherWrapper)(nil)
 
 // taskServiceFactory creates kata-direct services on demand
 type taskServiceFactory struct {
+	mu        sync.Mutex
 	publisher shim.Publisher
+	services  map[string]shim.Shim // Track created services for cleanup
 }
 
 func (f *taskServiceFactory) ID() string {
@@ -101,12 +104,37 @@ func (f *taskServiceFactory) Client() any {
 	return nil
 }
 
+// Delete cleans up resources for a specific service
 func (f *taskServiceFactory) Delete(ctx context.Context) error {
-	return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Cleanup all tracked services
+	var lastErr error
+	for id, svc := range f.services {
+		if _, err := svc.Cleanup(ctx); err != nil {
+			lastErr = fmt.Errorf("failed to cleanup service %s: %w", id, err)
+		}
+		delete(f.services, id)
+	}
+	return lastErr
 }
 
+// Close releases all factory resources
 func (f *taskServiceFactory) Close() error {
-	return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Shutdown all services
+	ctx := context.Background()
+	var lastErr error
+	for id, svc := range f.services {
+		if _, err := svc.Cleanup(ctx); err != nil {
+			lastErr = fmt.Errorf("failed to close service %s: %w", id, err)
+		}
+	}
+	f.services = make(map[string]shim.Shim)
+	return lastErr
 }
 
 // CreateService creates a new kata-direct service instance
@@ -116,7 +144,22 @@ func (f *taskServiceFactory) CreateService(ctx context.Context, id string, opts 
 		return nil, err
 	}
 
-	return New(ctx, id, f.publisher, func() {}, serviceOpts)
+	svc, err := New(ctx, id, f.publisher, func() {
+		// Cleanup callback when service exits
+		f.mu.Lock()
+		delete(f.services, id)
+		f.mu.Unlock()
+	}, serviceOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Track the service
+	f.mu.Lock()
+	f.services[id] = svc
+	f.mu.Unlock()
+
+	return svc, nil
 }
 
 func buildServiceOptions(opts cdruntime.CreateOpts) (*serviceOptions, error) {
