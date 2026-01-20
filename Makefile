@@ -82,7 +82,7 @@ CRICNIRELEASE=cri-containerd-cni-$(VERSION:v%=%)-${GOOS}-${GOARCH}
 PKG=github.com/containerd/containerd
 
 # Project binaries.
-COMMANDS=containerd
+COMMANDS=ctr containerd containerd-stress
 MANPAGES=ctr.8 containerd.8 containerd-config.8 containerd-config.toml.5
 
 ifdef BUILDTAGS
