@@ -6,6 +6,10 @@ package katadirect
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/containerd/containerd/events/exchange"
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
@@ -15,6 +19,21 @@ import (
 	"github.com/containerd/typeurl/v2"
 )
 
+var ignoreSIGHUPOnce sync.Once
+
+// ignoreSIGHUP configures the process to ignore SIGHUP signals.
+// This is critical for kata-direct because when running inside containerd (not as a separate shim),
+// the PTY master created for VM console is held by containerd. When the VM stops and the PTY slave
+// closes, it sends SIGHUP to the process holding the master, which would kill containerd.
+// By ignoring SIGHUP, we prevent containerd from being terminated when VMs are stopped.
+func ignoreSIGHUP() {
+	ignoreSIGHUPOnce.Do(func() {
+		// Ignore SIGHUP to prevent containerd from being killed when VM console PTY closes
+		signal.Ignore(syscall.SIGHUP)
+		fmt.Fprintf(os.Stderr, "[kata-direct] SIGHUP signal ignored to protect containerd from PTY closure\n")
+	})
+}
+
 func init() {
 	plugin.Register(&plugin.Registration{
 		Type: plugin.RuntimePluginV2,
@@ -23,6 +42,11 @@ func init() {
 			plugin.EventPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+
+			// CRITICAL: Ignore SIGHUP before any kata-direct operations
+			// This prevents containerd from being killed when VM console PTY is closed
+			ignoreSIGHUP()
+
 			ep, err := ic.GetByID(plugin.EventPlugin, "exchange")
 			if err != nil {
 				return nil, err
