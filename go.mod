@@ -40,7 +40,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
 	github.com/intel/goresctrl v0.8.0
-	github.com/kata-containers/kata-containers/src/runtime v0.0.0
+	github.com/kata-containers/kata-containers/src/runtime v0.0.0-20251103083417-897ecfb503ce
 	github.com/klauspost/compress v1.18.0
 	github.com/minio/sha256-simd v1.0.0
 	github.com/moby/locker v1.0.1
@@ -187,9 +187,6 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 	tags.cncf.io/container-device-interface/specs-go v1.0.0 // indirect
 )
-
-// Use local kata-containers repository
-replace github.com/kata-containers/kata-containers/src/runtime => /work/go/src/github.com/kata-containers/src/runtime
 
 // Workaround for indirect dependency no longer being available.
 // https://github.com/containerd/containerd/issues/9969
