@@ -125,8 +125,11 @@ func (f *taskServiceFactory) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Shutdown all services
-	ctx := context.Background()
+	// Shutdown all services with a timeout to avoid indefinite blocking
+	// Use withCleanupTimeout instead of context.Background() to ensure cleanup completes
+	ctx, cancel := withCleanupTimeout()
+	defer cancel()
+
 	var lastErr error
 	for id, svc := range f.services {
 		if _, err := svc.Cleanup(ctx); err != nil {

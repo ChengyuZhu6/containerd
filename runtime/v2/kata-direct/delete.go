@@ -89,6 +89,10 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 		}
 	}
 
+	// Ensure exitCh is closed so any Wait() callers are unblocked
+	// This is safe to call even if waitContainerProcess already closed it (uses sync.Once)
+	c.closeExitCh()
+
 	s.log.WithField("container", c.id).Info("container deleted successfully")
 
 	return nil

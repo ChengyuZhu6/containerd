@@ -67,7 +67,8 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 		stderr:   r.Stderr,
 		terminal: r.Terminal,
 		// Initialize channels for exit handling - like kata-shim-v2
-		exitCh:   make(chan uint32, 1),
+		// exitCh is closed (not sent to) when process exits - allows multiple waiters
+		exitCh:   make(chan struct{}),
 		exitIOch: make(chan struct{}),
 	}
 
@@ -141,16 +142,21 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 		WithField("memory_mb", configCopy.SandboxMemMB).
 		Info("sandbox sizing calculated")
 
-	// Use context.Background() for sandbox creation because:
+	// Use s.ctx (service context) for sandbox creation because:
 	// 1. sandbox.ctx is stored and used by kataAgent for all RPC calls
 	// 2. The request context (ctx) will be cancelled when the Create RPC completes
 	// 3. Long-running operations like readProcessStdout use k.ctx which comes from sandbox.ctx
 	// Using request context would cause "context canceled" errors when reading container output
 	//
+	// IMPORTANT: We use s.ctx instead of context.Background() so that:
+	// - When containerd shuts down (calls Shutdown/Cleanup), s.cancel() is called
+	// - This cancels s.ctx, which propagates to sandbox creation
+	// - Prevents resource leaks from orphaned sandbox creation operations
+	//
 	// NOTE: This is a long-running operation performed WITHOUT holding the lock
 	// to allow concurrent read operations (State, Pids, etc.)
 	sandbox, _, err := katautils.CreateSandbox(
-		context.Background(),
+		s.ctx,
 		s.vci,
 		*ociSpec,
 		configCopy,
@@ -173,8 +179,11 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 	// we must destroy the newly created sandbox to prevent resource leakage
 	if s.cleaned {
 		s.log.Warn("service cleanup triggered during sandbox creation, destroying orphan sandbox")
-		// Destroy the orphan sandbox in background to avoid blocking
+		// Track the cleanup operation so callers can wait for it to complete
+		// This prevents race conditions where callers retry before cleanup finishes
+		s.cleanupWg.Add(1)
 		go func() {
+			defer s.cleanupWg.Done()
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
 			defer cancel()
 			if err := sandbox.Stop(cleanupCtx, true); err != nil {
@@ -183,6 +192,7 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 			if err := sandbox.Delete(cleanupCtx); err != nil {
 				s.log.WithError(err).Error("failed to delete orphan sandbox")
 			}
+			s.log.Info("orphan sandbox cleanup completed")
 		}()
 		return fmt.Errorf("service cleanup triggered during sandbox creation")
 	}
@@ -209,10 +219,11 @@ func (s *service) createPodContainer(ctx context.Context, id, bundlePath string,
 		return fmt.Errorf("sandbox not found for container %s", id)
 	}
 
-	// Use context.Background() for container creation to be consistent with sandbox creation
+	// Use s.ctx (service context) for container creation to be consistent with sandbox creation
 	// This ensures long-running operations don't get cancelled when the request completes
+	// but CAN be cancelled when the service shuts down (preventing resource leaks)
 	_, err := katautils.CreateContainer(
-		context.Background(),
+		s.ctx,
 		sandbox,
 		*ociSpec,
 		rootFs,

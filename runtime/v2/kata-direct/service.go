@@ -75,6 +75,7 @@ type service struct {
 	publisher  shim.Publisher
 	exitCh     chan struct{}
 	cleaned    bool
+	cleanupWg  sync.WaitGroup // Tracks ongoing cleanup operations for orphan resources
 	configPath string
 	log        *logrus.Entry // per-service logger
 }
@@ -102,8 +103,19 @@ type container struct {
 	ioCancel    context.CancelFunc // Cancel function to stop IO goroutines
 
 	// Exit channel for Wait() - like kata-shim-v2
-	exitCh   chan uint32   // Channel to receive exit code
+	// exitCh is closed (not sent to) when process exits - this allows multiple waiters
+	exitCh   chan struct{} // Channel closed when process exits (broadcast signal)
+	exitOnce sync.Once     // Ensures exitCh is closed only once to prevent panic
 	exitIOch chan struct{} // Channel to signal IO streams closed
+}
+
+// closeExitCh safely closes the exit channel exactly once.
+// This prevents panic from closing an already-closed channel.
+// Multiple callers (waitContainerProcess, deleteContainer) can safely call this.
+func (c *container) closeExitCh() {
+	c.exitOnce.Do(func() {
+		close(c.exitCh)
+	})
 }
 
 // Global virtcontainers initialization - only done once
@@ -263,10 +275,13 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 	s.log.Info("Cleanup called")
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.cleaned {
-		s.log.Debug("Cleanup invoked after already completed")
+		s.mu.Unlock()
+		s.log.Debug("Cleanup invoked after already completed, waiting for pending cleanups")
+		// Wait for any ongoing orphan cleanup operations to complete
+		// This prevents race conditions where callers retry before cleanup finishes
+		s.cleanupWg.Wait()
 		return &taskAPI.DeleteResponse{
 			ExitedAt:   timestamppb.New(time.Now()),
 			ExitStatus: 0,
@@ -286,6 +301,11 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 	}
 
 	s.cancel()
+	s.mu.Unlock()
+
+	// Wait for any orphan cleanup operations that may have started
+	// (e.g., from createSandbox detecting s.cleaned=true)
+	s.cleanupWg.Wait()
 
 	return &taskAPI.DeleteResponse{
 		ExitedAt:   timestamppb.New(time.Now()),
@@ -662,8 +682,8 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 		}, nil
 	}
 
-	// Get the exit channel - this is how kata-shim-v2 does it
-	// Wait on the exitCh instead of directly calling WaitProcess
+	// Get the exit channel - this channel is CLOSED (not sent to) when process exits
+	// Closing a channel allows all waiters to be notified simultaneously (broadcast)
 	exitCh := c.exitCh
 	s.mu.RUnlock()
 
@@ -673,24 +693,24 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 
 	s.log.WithField("container", r.ID).Debug("Wait() waiting on exitCh")
 
-	// Wait for exit code from channel (populated by background waiter)
-	var ret uint32
+	// Wait for exit channel to be closed (broadcast signal)
 	select {
-	case ret = <-exitCh:
-		// Refill the channel in case there are other waiters
-		c.exitCh <- ret
+	case <-exitCh:
+		// Channel was closed, process has exited
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	s.log.WithField("container", r.ID).WithField("exit", ret).Debug("Wait() got exit code from channel")
-
+	// Read exit status from container (set by waitContainerProcess before closing exitCh)
 	s.mu.RLock()
+	exitCode := c.exit
 	exitedAt := timestamppb.New(c.exitTime)
 	s.mu.RUnlock()
 
+	s.log.WithField("container", r.ID).WithField("exit", exitCode).Debug("Wait() got exit code")
+
 	return &taskAPI.WaitResponse{
-		ExitStatus: ret,
+		ExitStatus: exitCode,
 		ExitedAt:   exitedAt,
 	}, nil
 }
