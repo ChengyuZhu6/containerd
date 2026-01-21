@@ -101,7 +101,12 @@ func (s *service) waitContainerProcess(c *container) {
 	sandbox := s.getSandbox()
 	if sandbox == nil {
 		s.log.WithField("container", c.id).Error("sandbox is nil in waitContainerProcess")
-		c.exitCh <- 255
+		s.mu.Lock()
+		c.status = task.Status_STOPPED
+		c.exit = 255
+		c.exitTime = time.Now()
+		s.mu.Unlock()
+		close(c.exitCh) // Broadcast exit to all waiters
 		return
 	}
 
@@ -133,8 +138,9 @@ func (s *service) waitContainerProcess(c *container) {
 	c.exitTime = exitTime
 	s.mu.Unlock()
 
-	// 4. Send exit code to channel for Wait() to receive
-	c.exitCh <- uint32(exitCode)
+	// 4. Close exit channel to broadcast to all waiters (Wait() calls)
+	// Using close() instead of send allows multiple concurrent Wait() calls to receive the signal
+	close(c.exitCh)
 
 	// 5. Handle sandbox cleanup for sandbox containers
 	s.cleanupAfterExit(c)
