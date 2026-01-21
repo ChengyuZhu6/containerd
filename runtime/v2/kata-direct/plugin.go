@@ -109,7 +109,9 @@ func (f *taskServiceFactory) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	ctx := context.Background()
+	ctx, cancel := withCleanupTimeout()
+	defer cancel()
+
 	var lastErr error
 	for id, svc := range f.services {
 		if _, err := svc.Cleanup(ctx); err != nil {

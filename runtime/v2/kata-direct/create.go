@@ -65,7 +65,7 @@ func (s *service) createContainer(ctx context.Context, r *taskAPI.CreateTaskRequ
 		stdout:   r.Stdout,
 		stderr:   r.Stderr,
 		terminal: r.Terminal,
-		exitCh:   make(chan uint32, 1),
+		exitCh:   make(chan struct{}),
 		exitIOch: make(chan struct{}),
 	}
 
@@ -137,7 +137,7 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 		Info("sandbox sizing calculated")
 
 	sandbox, _, err := katautils.CreateSandbox(
-		context.Background(),
+		s.ctx,
 		s.vci,
 		*ociSpec,
 		configCopy,
@@ -156,7 +156,9 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 
 	if s.cleaned {
 		s.log.Warn("service cleanup triggered during sandbox creation, destroying orphan sandbox")
+		s.cleanupWg.Add(1)
 		go func() {
+			defer s.cleanupWg.Done()
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
 			defer cancel()
 			if err := sandbox.Stop(cleanupCtx, true); err != nil {
@@ -165,6 +167,7 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 			if err := sandbox.Delete(cleanupCtx); err != nil {
 				s.log.WithError(err).Error("failed to delete orphan sandbox")
 			}
+			s.log.Info("orphan sandbox cleanup completed")
 		}()
 		return fmt.Errorf("service cleanup triggered during sandbox creation")
 	}
@@ -190,7 +193,7 @@ func (s *service) createPodContainer(ctx context.Context, id, bundlePath string,
 	}
 
 	_, err := katautils.CreateContainer(
-		context.Background(),
+		s.ctx,
 		sandbox,
 		*ociSpec,
 		rootFs,

@@ -73,6 +73,7 @@ type service struct {
 	publisher  shim.Publisher
 	exitCh     chan struct{}
 	cleaned    bool
+	cleanupWg  sync.WaitGroup // Tracks ongoing cleanup operations for orphan resources
 	configPath string
 	log        *logrus.Entry
 }
@@ -98,8 +99,15 @@ type container struct {
 	stdinFifo   io.Closer
 	ioCancel    context.CancelFunc
 
-	exitCh   chan uint32
+	exitCh   chan struct{}
+	exitOnce sync.Once
 	exitIOch chan struct{}
+}
+
+func (c *container) closeExitCh() {
+	c.exitOnce.Do(func() {
+		close(c.exitCh)
+	})
 }
 
 var vcLoggerOnce sync.Once
@@ -246,10 +254,11 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 	s.log.Info("Cleanup called")
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.cleaned {
-		s.log.Debug("Cleanup invoked after already completed")
+		s.mu.Unlock()
+		s.log.Debug("Cleanup invoked after already completed, waiting for pending cleanups")
+		s.cleanupWg.Wait()
 		return &taskAPI.DeleteResponse{
 			ExitedAt:   timestamppb.New(time.Now()),
 			ExitStatus: 0,
@@ -269,6 +278,9 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 	}
 
 	s.cancel()
+	s.mu.Unlock()
+
+	s.cleanupWg.Wait()
 
 	return &taskAPI.DeleteResponse{
 		ExitedAt:   timestamppb.New(time.Now()),
@@ -641,22 +653,21 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 
 	s.log.WithField("container", r.ID).Debug("Wait() waiting on exitCh")
 
-	var ret uint32
 	select {
-	case ret = <-exitCh:
-		c.exitCh <- ret
+	case <-exitCh:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	s.log.WithField("container", r.ID).WithField("exit", ret).Debug("Wait() got exit code from channel")
-
 	s.mu.RLock()
+	exitCode := c.exit
 	exitedAt := timestamppb.New(c.exitTime)
 	s.mu.RUnlock()
 
+	s.log.WithField("container", r.ID).WithField("exit", exitCode).Debug("Wait() got exit code")
+
 	return &taskAPI.WaitResponse{
-		ExitStatus: ret,
+		ExitStatus: exitCode,
 		ExitedAt:   exitedAt,
 	}, nil
 }

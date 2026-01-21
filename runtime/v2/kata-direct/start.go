@@ -80,7 +80,12 @@ func (s *service) waitContainerProcess(c *container) {
 	sandbox := s.getSandbox()
 	if sandbox == nil {
 		s.log.WithField("container", c.id).Error("sandbox is nil in waitContainerProcess")
-		c.exitCh <- 255
+		s.mu.Lock()
+		c.status = task.Status_STOPPED
+		c.exit = 255
+		c.exitTime = time.Now()
+		s.mu.Unlock()
+		c.closeExitCh()
 		return
 	}
 
@@ -109,7 +114,7 @@ func (s *service) waitContainerProcess(c *container) {
 	c.exitTime = exitTime
 	s.mu.Unlock()
 
-	c.exitCh <- uint32(exitCode)
+	c.closeExitCh()
 
 	s.cleanupAfterExit(c)
 }

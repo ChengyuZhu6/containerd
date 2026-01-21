@@ -83,6 +83,8 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 		}
 	}
 
+	c.closeExitCh()
+
 	s.log.WithField("container", c.id).Info("container deleted successfully")
 
 	return nil
