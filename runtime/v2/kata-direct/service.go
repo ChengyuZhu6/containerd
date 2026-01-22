@@ -92,6 +92,9 @@ type container struct {
 	stderr   string
 	terminal bool
 
+	execsMu sync.RWMutex
+	execs   map[string]*exec
+
 	ioMu        sync.Mutex
 	ioWg        sync.WaitGroup
 	ioAttached  bool
@@ -353,8 +356,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 }
 
 func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.StartResponse, error) {
-	s.log.WithField("container", r.ID).Info("Start() start")
-	defer s.log.WithField("container", r.ID).Info("Start() end")
+	s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Start() start")
+	defer s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Start() end")
 
 	s.mu.Lock()
 	c, ok := s.containers[r.ID]
@@ -362,6 +365,39 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if r.ExecID != "" {
+		errCh := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.WithField("panic", r).Error("Start exec panic recovered")
+					errCh <- fmt.Errorf("start exec panic: %v", r)
+				}
+			}()
+
+			errCh <- s.startExec(ctx, c, r.ExecID)
+		}()
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("start exec timeout: %v/%v", r.ID, r.ExecID)
+		case err := <-errCh:
+			if err != nil {
+				return nil, errdefs.ToGRPC(err)
+			}
+
+			s.events <- &eventstypes.TaskExecStarted{
+				ContainerID: c.id,
+				ExecID:      r.ExecID,
+				Pid:         s.hpid,
+			}
+
+			return &taskAPI.StartResponse{
+				Pid: s.hpid,
+			}, nil
+		}
 	}
 
 	errCh := make(chan error, 1)
@@ -396,8 +432,8 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 }
 
 func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAPI.DeleteResponse, error) {
-	s.log.WithField("container", r.ID).Info("Delete() start")
-	defer s.log.WithField("container", r.ID).Info("Delete() end")
+	s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Delete() start")
+	defer s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Delete() end")
 
 	s.mu.Lock()
 	c, ok := s.containers[r.ID]
@@ -405,6 +441,19 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if r.ExecID != "" {
+		e, err := s.deleteExec(c, r.ExecID)
+		if err != nil {
+			return nil, errdefs.ToGRPC(err)
+		}
+
+		return &taskAPI.DeleteResponse{
+			ExitStatus: uint32(e.exitCode),
+			ExitedAt:   timestamppb.New(e.exitTime),
+			Pid:        s.hpid,
+		}, nil
 	}
 
 	errCh := make(chan error, 1)
@@ -448,12 +497,38 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 
 func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.StateResponse, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	c, ok := s.containers[r.ID]
+	s.mu.RUnlock()
+
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
+
+	if r.ExecID != "" {
+		c.execsMu.RLock()
+		e, ok := c.execs[r.ExecID]
+		c.execsMu.RUnlock()
+
+		if !ok {
+			return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "exec %s not found", r.ExecID)
+		}
+
+		return &taskAPI.StateResponse{
+			ID:         e.id,
+			Bundle:     c.bundle,
+			Pid:        s.hpid,
+			Status:     e.status,
+			Stdin:      e.stdin,
+			Stdout:     e.stdout,
+			Stderr:     e.stderr,
+			Terminal:   e.terminal,
+			ExitStatus: uint32(e.exitCode),
+			ExitedAt:   timestamppb.New(e.exitTime),
+		}, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	return &taskAPI.StateResponse{
 		ID:         c.id,
@@ -470,7 +545,7 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 }
 
 func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Empty, error) {
-	s.log.WithField("container", r.ID).WithField("signal", r.Signal).Info("Kill()")
+	s.log.WithField("container", r.ID).WithField("exec", r.ExecID).WithField("signal", r.Signal).Info("Kill()")
 
 	s.mu.RLock()
 	c, ok := s.containers[r.ID]
@@ -485,6 +560,44 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
+	processID := c.id
+	processStatus := c.status
+
+	if r.ExecID != "" {
+		c.execsMu.RLock()
+		e, ok := c.execs[r.ExecID]
+		c.execsMu.RUnlock()
+
+		if !ok {
+			return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "exec %s not found", r.ExecID)
+		}
+
+		processID = e.token
+		processStatus = e.status
+
+		if processID == "" {
+			s.log.WithFields(logrus.Fields{
+				"sandbox":   sandbox.ID(),
+				"container": c.id,
+				"exec-id":   r.ExecID,
+			}).Debug("token of exec process to be signalled is empty")
+			return empty, fmt.Errorf("the exec process does not exist")
+		}
+	} else {
+		r.All = true
+	}
+
+	signum := syscall.Signal(r.Signal)
+
+	if (signum == syscall.SIGKILL || signum == syscall.SIGTERM) && processStatus == task.Status_STOPPED {
+		s.log.WithFields(logrus.Fields{
+			"sandbox":   sandbox.ID(),
+			"container": c.id,
+			"exec-id":   r.ExecID,
+		}).Debug("process has already stopped")
+		return empty, nil
+	}
+
 	opCtx, cancel := withOperationTimeout(ctx)
 	defer cancel()
 
@@ -497,12 +610,12 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*emptypb.Em
 			}
 		}()
 
-		errCh <- sandbox.KillContainer(opCtx, c.id, syscall.Signal(r.Signal), r.All)
+		errCh <- sandbox.SignalProcess(opCtx, c.id, processID, signum, r.All)
 	}()
 
 	select {
 	case <-opCtx.Done():
-		return nil, fmt.Errorf("kill container timeout: %v", r.ID)
+		return nil, fmt.Errorf("kill process timeout: %v/%v", r.ID, r.ExecID)
 	case err := <-errCh:
 		if err != nil {
 			return nil, errdefs.ToGRPC(err)
@@ -562,7 +675,42 @@ func (s *service) Resume(ctx context.Context, r *taskAPI.ResumeRequest) (*emptyp
 }
 
 func (s *service) Exec(ctx context.Context, r *taskAPI.ExecProcessRequest) (*emptypb.Empty, error) {
-	return nil, errdefs.ToGRPC(errdefs.ErrNotImplemented)
+	s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Exec() start")
+	defer s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Info("Exec() end")
+
+	s.mu.RLock()
+	c, ok := s.containers[r.ID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	c.execsMu.RLock()
+	if _, exists := c.execs[r.ExecID]; exists {
+		c.execsMu.RUnlock()
+		return nil, errdefs.ToGRPCf(errdefs.ErrAlreadyExists, "exec %s already exists", r.ExecID)
+	}
+	c.execsMu.RUnlock()
+
+	e, err := newExec(c.id, r.ExecID, r.Stdin, r.Stdout, r.Stderr, r.Terminal, r.Spec)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+
+	c.execsMu.Lock()
+	if c.execs == nil {
+		c.execs = make(map[string]*exec)
+	}
+	c.execs[r.ExecID] = e
+	c.execsMu.Unlock()
+
+	s.events <- &eventstypes.TaskExecAdded{
+		ContainerID: c.id,
+		ExecID:      r.ExecID,
+	}
+
+	return empty, nil
 }
 
 func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*emptypb.Empty, error) {
@@ -579,15 +727,22 @@ func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*
 		return nil, fmt.Errorf("sandbox not found")
 	}
 
-	execID := r.ExecID
-	if execID == "" {
-		execID = c.id
+	processID := c.id
+	if r.ExecID != "" {
+		c.execsMu.RLock()
+		e, ok := c.execs[r.ExecID]
+		c.execsMu.RUnlock()
+
+		if !ok {
+			return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "exec %s not found", r.ExecID)
+		}
+		processID = e.token
 	}
 
 	opCtx, cancel := withOperationTimeout(ctx)
 	defer cancel()
 
-	if err := sandbox.WinsizeProcess(opCtx, c.id, execID, r.Height, r.Width); err != nil {
+	if err := sandbox.WinsizeProcess(opCtx, c.id, processID, r.Height, r.Width); err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
 
@@ -601,6 +756,27 @@ func (s *service) CloseIO(ctx context.Context, r *taskAPI.CloseIORequest) (*empt
 
 	if !ok {
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if r.ExecID != "" {
+		c.execsMu.RLock()
+		e, ok := c.execs[r.ExecID]
+		c.execsMu.RUnlock()
+
+		if !ok {
+			return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "exec %s not found", r.ExecID)
+		}
+
+		e.ioMu.Lock()
+		if e.stdinCloser != nil {
+			if err := e.stdinCloser.Close(); err != nil {
+				s.log.WithError(err).WithField("exec", r.ExecID).Warn("failed to close exec stdin")
+			}
+			e.stdinCloser = nil
+		}
+		e.ioMu.Unlock()
+
+		return empty, nil
 	}
 
 	c.ioMu.Lock()
@@ -624,7 +800,7 @@ func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*em
 }
 
 func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.WaitResponse, error) {
-	s.log.WithField("container", r.ID).Debug("Wait() called")
+	s.log.WithField("container", r.ID).WithField("exec", r.ExecID).Debug("Wait() called")
 
 	s.mu.RLock()
 	c, ok := s.containers[r.ID]
@@ -632,7 +808,47 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 		s.mu.RUnlock()
 		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
 	}
+	s.mu.RUnlock()
 
+	if r.ExecID != "" {
+		c.execsMu.RLock()
+		e, ok := c.execs[r.ExecID]
+		c.execsMu.RUnlock()
+
+		if !ok {
+			return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "exec %s not found", r.ExecID)
+		}
+
+		if e.status == task.Status_STOPPED && !e.exitTime.IsZero() {
+			s.log.WithField("exec", r.ExecID).WithField("exit", e.exitCode).Debug("Wait() returning cached exec exit status")
+			return &taskAPI.WaitResponse{
+				ExitStatus: uint32(e.exitCode),
+				ExitedAt:   timestamppb.New(e.exitTime),
+			}, nil
+		}
+
+		exitCh := e.exitCh
+		if exitCh == nil {
+			return nil, fmt.Errorf("exec %s exit channel not initialized", r.ExecID)
+		}
+
+		s.log.WithField("exec", r.ExecID).Debug("Wait() waiting on exec exitCh")
+
+		select {
+		case <-exitCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		s.log.WithField("exec", r.ExecID).WithField("exit", e.exitCode).Debug("Wait() got exec exit code")
+
+		return &taskAPI.WaitResponse{
+			ExitStatus: uint32(e.exitCode),
+			ExitedAt:   timestamppb.New(e.exitTime),
+		}, nil
+	}
+
+	s.mu.RLock()
 	if c.status == task.Status_STOPPED && !c.exitTime.IsZero() {
 		exitedAt := timestamppb.New(c.exitTime)
 		exitCode := c.exit
