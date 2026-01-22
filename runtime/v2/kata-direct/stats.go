@@ -332,23 +332,39 @@ func copyBlkioV1(s []vc.BlkioStatEntry) []*cgroupsv1.BlkIOEntry {
 }
 
 func copyBlkioV2(s []vc.BlkioStatEntry) []*cgroupsv2.IOEntry {
-	var ret []*cgroupsv2.IOEntry
-	item := cgroupsv2.IOEntry{}
+	// Group entries by device (major:minor)
+	deviceMap := make(map[uint64]*cgroupsv2.IOEntry)
+
 	for _, v := range s {
+		// Create unique key for device using major and minor numbers
+		key := (uint64(v.Major) << 32) | uint64(v.Minor)
+
+		entry, ok := deviceMap[key]
+		if !ok {
+			entry = &cgroupsv2.IOEntry{
+				Major: v.Major,
+				Minor: v.Minor,
+			}
+			deviceMap[key] = entry
+		}
+
 		switch v.Op {
 		case "read":
-			item.Rbytes = v.Value
+			entry.Rbytes = v.Value
 		case "write":
-			item.Wbytes = v.Value
+			entry.Wbytes = v.Value
 		case "rios":
-			item.Rios = v.Value
+			entry.Rios = v.Value
 		case "wios":
-			item.Wios = v.Value
+			entry.Wios = v.Value
 		}
-		item.Major = v.Major
-		item.Minor = v.Minor
 	}
-	ret = append(ret, &item)
+
+	// Convert map to slice
+	ret := make([]*cgroupsv2.IOEntry, 0, len(deviceMap))
+	for _, entry := range deviceMap {
+		ret = append(ret, entry)
+	}
 
 	return ret
 }
