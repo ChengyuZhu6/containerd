@@ -205,6 +205,14 @@ func (s *service) handleIO(ctx context.Context, c *container) error {
 		return fmt.Errorf("failed to get IO stream: %w", err)
 	}
 
+	ioSetupSuccess := false
+	defer func() {
+		if !ioSetupSuccess {
+			s.log.WithField("container", c.id).Warn("IO setup failed, cleaning up streams")
+			s.closeIOStreams(stdinStream, stdoutStream, stderrStream)
+		}
+	}()
+
 	c.ioAttached = true
 	ioCtx, ioCancel := context.WithCancel(ctx)
 	c.ioCancel = ioCancel
@@ -212,29 +220,55 @@ func (s *service) handleIO(ctx context.Context, c *container) error {
 
 	s.log.WithField("container", c.id).Info("attaching IO streams")
 
+	var stdinUsed, stdoutUsed, stderrUsed bool
+
 	var stdinFifo io.ReadCloser
 	if c.stdin != "" && stdinStream != nil {
 		c.stdinCloser = stdinStream
 		f, err := fifo.OpenFifo(ioCtx, c.stdin, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			s.log.WithError(err).WithField("path", c.stdin).Warn("failed to open stdin fifo")
+			if closer, ok := stdinStream.(io.Closer); ok {
+				closer.Close()
+			}
 		} else {
 			stdinFifo = f
 			c.stdinFifo = f
 			c.ioWg.Add(1)
+			stdinUsed = true
 			go s.copyStdin(c, stdinStream, stdinFifo)
 		}
 	}
 
 	if c.stdout != "" && stdoutStream != nil {
 		c.ioWg.Add(1)
+		stdoutUsed = true
 		go s.copyStdout(ioCtx, c, stdoutStream, stdinFifo)
 	}
 
 	if c.stderr != "" && stderrStream != nil {
 		c.ioWg.Add(1)
+		stderrUsed = true
 		go s.copyStderr(ioCtx, c, stderrStream)
 	}
+
+	if !stdinUsed && stdinStream != nil {
+		if closer, ok := stdinStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stdoutUsed && stdoutStream != nil {
+		if closer, ok := stdoutStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stderrUsed && stderrStream != nil {
+		if closer, ok := stderrStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+
+	ioSetupSuccess = true
 
 	go func() {
 		c.ioWg.Wait()
@@ -243,6 +277,19 @@ func (s *service) handleIO(ctx context.Context, c *container) error {
 	}()
 
 	return nil
+}
+
+func (s *service) closeIOStreams(streams ...interface{}) {
+	for _, stream := range streams {
+		if stream == nil {
+			continue
+		}
+		if closer, ok := stream.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				s.log.WithError(err).Debug("failed to close IO stream during cleanup")
+			}
+		}
+	}
 }
 
 func (s *service) copyStdin(c *container, dst io.WriteCloser, src io.ReadCloser) {

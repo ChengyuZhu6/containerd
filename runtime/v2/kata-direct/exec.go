@@ -228,6 +228,14 @@ func (s *service) handleExecIO(ctx context.Context, c *container, e *exec) error
 		return fmt.Errorf("failed to get exec IO stream: %w", err)
 	}
 
+	ioSetupSuccess := false
+	defer func() {
+		if !ioSetupSuccess {
+			s.log.WithField("exec", e.id).Warn("exec IO setup failed, cleaning up streams")
+			s.closeIOStreams(stdinStream, stdoutStream, stderrStream)
+		}
+	}()
+
 	e.ioAttached = true
 	ioCtx, ioCancel := context.WithCancel(ctx)
 	e.ioCancel = ioCancel
@@ -235,29 +243,54 @@ func (s *service) handleExecIO(ctx context.Context, c *container, e *exec) error
 
 	s.log.WithField("exec", e.id).Info("attaching exec IO streams")
 
+	var stdinUsed, stdoutUsed, stderrUsed bool
 	var stdinFifo io.ReadCloser
 	if e.stdin != "" && stdinStream != nil {
 		e.stdinCloser = stdinStream
 		f, err := fifo.OpenFifo(ioCtx, e.stdin, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			s.log.WithError(err).WithField("path", e.stdin).Warn("failed to open exec stdin fifo")
+			if closer, ok := stdinStream.(io.Closer); ok {
+				closer.Close()
+			}
 		} else {
 			stdinFifo = f
 			e.stdinFifo = f
 			e.ioWg.Add(1)
+			stdinUsed = true
 			go s.copyExecStdin(e, stdinStream, stdinFifo)
 		}
 	}
 
 	if e.stdout != "" && stdoutStream != nil {
 		e.ioWg.Add(1)
+		stdoutUsed = true
 		go s.copyExecStdout(ioCtx, e, stdoutStream, stdinFifo)
 	}
 
 	if e.stderr != "" && stderrStream != nil {
 		e.ioWg.Add(1)
+		stderrUsed = true
 		go s.copyExecStderr(ioCtx, e, stderrStream)
 	}
+
+	if !stdinUsed && stdinStream != nil {
+		if closer, ok := stdinStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stdoutUsed && stdoutStream != nil {
+		if closer, ok := stdoutStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stderrUsed && stderrStream != nil {
+		if closer, ok := stderrStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+
+	ioSetupSuccess = true
 
 	go func() {
 		e.ioWg.Wait()
