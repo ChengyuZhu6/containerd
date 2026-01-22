@@ -105,7 +105,17 @@ type container struct {
 	// Exit channel for Wait() - like kata-shim-v2
 	// exitCh is closed (not sent to) when process exits - this allows multiple waiters
 	exitCh   chan struct{} // Channel closed when process exits (broadcast signal)
+	exitOnce sync.Once     // Ensures exitCh is closed only once to prevent panic
 	exitIOch chan struct{} // Channel to signal IO streams closed
+}
+
+// closeExitCh safely closes the exit channel exactly once.
+// This prevents panic from closing an already-closed channel.
+// Multiple callers (waitContainerProcess, deleteContainer) can safely call this.
+func (c *container) closeExitCh() {
+	c.exitOnce.Do(func() {
+		close(c.exitCh)
+	})
 }
 
 // Global virtcontainers initialization - only done once

@@ -106,7 +106,7 @@ func (s *service) waitContainerProcess(c *container) {
 		c.exit = 255
 		c.exitTime = time.Now()
 		s.mu.Unlock()
-		close(c.exitCh) // Broadcast exit to all waiters
+		c.closeExitCh() // Safely broadcast exit to all waiters
 		return
 	}
 
@@ -139,8 +139,8 @@ func (s *service) waitContainerProcess(c *container) {
 	s.mu.Unlock()
 
 	// 4. Close exit channel to broadcast to all waiters (Wait() calls)
-	// Using close() instead of send allows multiple concurrent Wait() calls to receive the signal
-	close(c.exitCh)
+	// Using closeExitCh() ensures the channel is closed exactly once, preventing panic
+	c.closeExitCh()
 
 	// 5. Handle sandbox cleanup for sandbox containers
 	s.cleanupAfterExit(c)
