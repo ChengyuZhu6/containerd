@@ -189,7 +189,7 @@ require (
 )
 
 // Use local kata-containers repository
-replace github.com/kata-containers/kata-containers/src/runtime => /work/go/src/github.com/kata-containers/src/runtime
+replace github.com/kata-containers/kata-containers/src/runtime => git.woa.com/tlinux/TSS-tools/kata-containers/src/runtime v0.0.0-20251230162803-e36b3c329485
 
 // Workaround for indirect dependency no longer being available.
 // https://github.com/containerd/containerd/issues/9969
