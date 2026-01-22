@@ -17,7 +17,10 @@ import (
 
 func (s *service) deleteContainer(ctx context.Context, c *container) error {
 	sandbox := s.getSandbox()
-	if sandbox == nil {
+
+	// For non-sandbox containers, sandbox must exist
+	// For sandbox containers, sandbox may have been cleaned up in cleanupAfterExit
+	if sandbox == nil && !c.cType.IsSandbox() {
 		return fmt.Errorf("sandbox not found for container %s", c.id)
 	}
 
@@ -78,7 +81,12 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 		}
 	}
 
-	if err := katautils.PostStopHooks(opCtx, *c.spec, sandbox.ID(), c.bundle); err != nil {
+	// Run post-stop hooks - sandbox may be nil for sandbox containers after cleanup
+	sandboxID := c.id // For sandbox containers, use container id as sandbox id
+	if sandbox != nil {
+		sandboxID = sandbox.ID()
+	}
+	if err := katautils.PostStopHooks(opCtx, *c.spec, sandboxID, c.bundle); err != nil {
 		s.log.WithError(err).Warn("failed to run post-stop hooks")
 	}
 
