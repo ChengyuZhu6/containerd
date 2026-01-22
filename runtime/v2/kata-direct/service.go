@@ -12,11 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containerd/cgroups"
 	eventstypes "github.com/containerd/containerd/api/events"
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/protobuf"
 	cdruntime "github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/runtime/v2/shim"
 	"github.com/sirupsen/logrus"
@@ -955,7 +957,49 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 }
 
 func (s *service) Stats(ctx context.Context, r *taskAPI.StatsRequest) (*taskAPI.StatsResponse, error) {
-	return nil, errdefs.ToGRPC(errdefs.ErrNotImplemented)
+	s.log.WithField("container", r.ID).Debug("Stats() called")
+
+	s.mu.RLock()
+	c, ok := s.containers[r.ID]
+	sandbox := s.sandbox
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil, errdefs.ToGRPCf(errdefs.ErrNotFound, "container %s not found", r.ID)
+	}
+
+	if sandbox == nil {
+		return nil, fmt.Errorf("sandbox not found")
+	}
+
+	// Add timeout if not already set
+	opCtx, cancel := withOperationTimeout(ctx)
+	defer cancel()
+
+	// Get container stats from sandbox (VM)
+	stats, err := sandbox.StatsContainer(opCtx, c.id)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+
+	// Convert to cgroups metrics format based on cgroup version
+	var metrics interface{}
+	if cgroups.Mode() == cgroups.Unified {
+		// cgroupsv2
+		metrics = statsToMetricsV2(&stats)
+	} else {
+		// cgroupsv1
+		metrics = statsToMetricsV1(&stats)
+	}
+
+	data, err := protobuf.MarshalAnyToProto(metrics)
+	if err != nil {
+		return nil, err
+	}
+
+	return &taskAPI.StatsResponse{
+		Stats: data,
+	}, nil
 }
 
 func (s *service) Connect(ctx context.Context, r *taskAPI.ConnectRequest) (*taskAPI.ConnectResponse, error) {
