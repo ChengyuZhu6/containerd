@@ -256,12 +256,26 @@ func (s *service) handleExecIO(ctx context.Context, c *container, e *exec) error
 		return fmt.Errorf("failed to get exec IO stream: %w", err)
 	}
 
+	// Track whether we successfully set up at least one IO stream
+	// If all setup fails, we need to clean up the streams we got from sandbox
+	ioSetupSuccess := false
+	defer func() {
+		if !ioSetupSuccess {
+			// Clean up IO streams if setup failed
+			s.log.WithField("exec", e.id).Warn("exec IO setup failed, cleaning up streams")
+			s.closeIOStreams(stdinStream, stdoutStream, stderrStream)
+		}
+	}()
+
 	e.ioAttached = true
 	ioCtx, ioCancel := context.WithCancel(ctx)
 	e.ioCancel = ioCancel
 	e.ioMu.Unlock()
 
 	s.log.WithField("exec", e.id).Info("attaching exec IO streams")
+
+	// Track which streams are being used by goroutines
+	var stdinUsed, stdoutUsed, stderrUsed bool
 
 	// Setup stdin
 	var stdinFifo io.ReadCloser
@@ -270,10 +284,15 @@ func (s *service) handleExecIO(ctx context.Context, c *container, e *exec) error
 		f, err := fifo.OpenFifo(ioCtx, e.stdin, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			s.log.WithError(err).WithField("path", e.stdin).Warn("failed to open exec stdin fifo")
+			// Close stdinStream since we won't use it
+			if closer, ok := stdinStream.(io.Closer); ok {
+				closer.Close()
+			}
 		} else {
 			stdinFifo = f
 			e.stdinFifo = f
 			e.ioWg.Add(1)
+			stdinUsed = true
 			go s.copyExecStdin(e, stdinStream, stdinFifo)
 		}
 	}
@@ -281,14 +300,36 @@ func (s *service) handleExecIO(ctx context.Context, c *container, e *exec) error
 	// Setup stdout
 	if e.stdout != "" && stdoutStream != nil {
 		e.ioWg.Add(1)
+		stdoutUsed = true
 		go s.copyExecStdout(ioCtx, e, stdoutStream, stdinFifo)
 	}
 
 	// Setup stderr
 	if e.stderr != "" && stderrStream != nil {
 		e.ioWg.Add(1)
+		stderrUsed = true
 		go s.copyExecStderr(ioCtx, e, stderrStream)
 	}
+
+	// Close unused streams to prevent leaks
+	if !stdinUsed && stdinStream != nil {
+		if closer, ok := stdinStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stdoutUsed && stdoutStream != nil {
+		if closer, ok := stdoutStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+	if !stderrUsed && stderrStream != nil {
+		if closer, ok := stderrStream.(io.Closer); ok {
+			closer.Close()
+		}
+	}
+
+	// Mark setup as successful - at least we processed all streams
+	ioSetupSuccess = true
 
 	// Start goroutine to signal when all IO is done
 	go func() {
