@@ -30,6 +30,11 @@ const (
 	unifiedMountpoint = "/sys/fs/cgroup"
 )
 
+// IsCgroupV2 returns true if the system is using cgroup v2 (unified hierarchy)
+func IsCgroupV2() bool {
+	return cgroups.Mode() == cgroups.Unified
+}
+
 func RenameCgroupPath(path string) (string, error) {
 	if path == "" || path == "." {
 		path = DefaultResourceControllerID
@@ -470,4 +475,43 @@ func (c *LinuxCgroup) ID() string {
 
 func (c *LinuxCgroup) Parent() string {
 	return filepath.Dir(c.path)
+}
+
+// DeleteCgroupPathV1 deletes a cgroup path from all cgroup v1 subsystems.
+// It iterates over /sys/fs/cgroup and removes the cgroup directory from each
+// subsystem, skipping symlinks to avoid duplicate operations.
+func DeleteCgroupPathV1(cgroupPath string) error {
+	controllerLogger.WithField("source", "cgroups").Debugf(
+		"DeleteCgroupPathV1: deleting cgroup path %s", cgroupPath)
+	entries, err := os.ReadDir(unifiedMountpoint)
+	if err != nil {
+		return fmt.Errorf("failed to read cgroup mount point %s: %w", unifiedMountpoint, err)
+	}
+
+	var lastErr error
+	for _, entry := range entries {
+		entryPath := filepath.Join(unifiedMountpoint, entry.Name())
+		fileInfo, err := os.Lstat(entryPath)
+		if err != nil {
+			controllerLogger.WithField("source", "cgroups").Warnf(
+				"DeleteCgroupPathV1: failed to lstat %s: %v", entryPath, err)
+			continue
+		}
+		// Skip symbolic links to avoid duplicate operations
+		if fileInfo.Mode()&os.ModeSymlink != 0 {
+			controllerLogger.WithField("source", "cgroups").Debugf(
+				"DeleteCgroupPathV1: skipping symlink %s", entryPath)
+			continue
+		}
+		if !fileInfo.IsDir() {
+			continue
+		}
+		subsysPath := filepath.Join(entryPath, cgroupPath)
+		if err := os.Remove(subsysPath); err != nil && !os.IsNotExist(err) {
+			controllerLogger.WithField("source", "cgroups").Debugf(
+				"DeleteCgroupPathV1: failed to remove %s: %v", subsysPath, err)
+			lastErr = err
+		}
+	}
+	return lastErr
 }

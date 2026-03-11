@@ -108,6 +108,7 @@ func (endpoint *MacvlanEndpoint) Attach(ctx context.Context, s *Sandbox) error {
 	defer span.End()
 
 	h := s.hypervisor
+	networkLogger().WithField("endpoint-name", endpoint.Name()).Info("HotAttach endpoint")
 	if err := xConnectVMNetwork(ctx, endpoint, h); err != nil {
 		networkLogger().WithError(err).Error("Error bridging bridged macvlan ep")
 		return err
@@ -137,6 +138,7 @@ func (endpoint *MacvlanEndpoint) HotAttach(ctx context.Context, s *Sandbox) erro
 	span, ctx := macvlanTrace(ctx, "HotAttach", endpoint)
 	defer span.End()
 
+	networkLogger().WithField("endpoint-name", endpoint.Name()).Info("Attach endpoint")
 	h := s.hypervisor
 	if err := xConnectVMNetwork(ctx, endpoint, h); err != nil {
 		networkLogger().WithError(err).Error("Error bridging macvlan ep")

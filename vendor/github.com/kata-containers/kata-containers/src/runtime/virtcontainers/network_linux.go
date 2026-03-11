@@ -343,7 +343,9 @@ func (n *LinuxNetwork) addAllEndpoints(ctx context.Context, s *Sandbox, hotplug 
 		return err
 	}
 
-	for _, link := range linkList {
+	l := len(linkList)
+
+	for i, link := range linkList {
 		netInfo, err := networkInfoFromLink(netlinkHandle, link)
 		if err != nil {
 			return err
@@ -369,7 +371,17 @@ func (n *LinuxNetwork) addAllEndpoints(ctx context.Context, s *Sandbox, hotplug 
 		}
 
 		if err := doNetNS(n.netNSPath, func(_ ns.NetNS) error {
-			_, err = n.addSingleEndpoint(ctx, s, netInfo, hotplug)
+			if hotplug {
+				if s.config.HypervisorType == ClhHypervisor && l == i+1 {
+					_, err = n.addSingleEndpoint(ctx, s, netInfo, true)
+				} else if s.config.HypervisorType == QemuHypervisor {
+					_, err = n.addSingleEndpoint(ctx, s, netInfo, true)
+				} else {
+					_, err = n.addSingleEndpoint(ctx, s, netInfo, false)
+				}
+			} else {
+				_, err = n.addSingleEndpoint(ctx, s, netInfo, false)
+			}
 			return err
 		}); err != nil {
 			return err

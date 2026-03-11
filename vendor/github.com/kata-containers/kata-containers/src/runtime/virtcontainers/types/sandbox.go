@@ -62,6 +62,10 @@ type SandboxState struct {
 	// cgroup.
 	OverheadCgroupPath string `json:"overheadCgroupPath,omitempty"`
 
+	// VirtiofsdCgroupPath is the path to the optional virtiofsd sub-cgroup
+	// under overhead cgroup for dedicated virtiofsd resource control.
+	VirtiofsdCgroupPath string `json:"virtiofsdCgroupPath,omitempty"`
+
 	// PersistVersion indicates current storage api version.
 	// It's also known as ABI version of kata-runtime.
 	// Note: it won't be written to disk

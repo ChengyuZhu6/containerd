@@ -7,6 +7,10 @@ package virtcontainers
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	mutils "github.com/kata-containers/kata-containers/src/runtime/pkg/utils"
 	"github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols/grpc"
@@ -182,6 +186,35 @@ func (s *Sandbox) UpdateRuntimeMetrics() error {
 	return nil
 }
 
+// getChildPids returns all child process PIDs of the given parent PID
+// by reading /proc/<pid>/task/<pid>/children file directly.
+// This is much faster than scanning the entire /proc directory.
+func getChildPids(parentPid int) ([]int, error) {
+	// Read /proc/<pid>/task/<pid>/children which contains space-separated child PIDs
+	childrenPath := fmt.Sprintf("%s/%d/task/%d/children", procfs.DefaultMountPoint, parentPid, parentPid)
+	data, err := os.ReadFile(childrenPath)
+	if err != nil {
+		return nil, err
+	}
+
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return nil, nil
+	}
+
+	pidStrs := strings.Fields(content)
+	childPids := make([]int, 0, len(pidStrs))
+	for _, pidStr := range pidStrs {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		childPids = append(childPids, pid)
+	}
+
+	return childPids, nil
+}
+
 func (s *Sandbox) UpdateVirtiofsdMetrics() error {
 	vfsPid := s.hypervisor.GetVirtioFsPid()
 	if vfsPid == nil {
@@ -194,25 +227,48 @@ func (s *Sandbox) UpdateVirtiofsdMetrics() error {
 		return err
 	}
 
-	// process FDs
+	// The following metrics are read from the main process (supervisor):
+	// - virtiofsd_fds
+	// - virtiofsd_threads
 	if fds, err := proc.FileDescriptorsLen(); err == nil {
 		virtiofsdOpenFDs.Set(float64(fds))
 	}
 
-	// process statistics
 	if procStat, err := proc.Stat(); err == nil {
 		virtiofsdThreads.Set(float64(procStat.NumThreads))
-		mutils.SetGaugeVecProcStat(virtiofsdProcStat, procStat)
 	}
 
-	// process status
-	if procStatus, err := proc.NewStatus(); err == nil {
-		mutils.SetGaugeVecProcStatus(virtiofsdProcStatus, procStatus)
-	}
-
-	// process IO statistics
-	if ioStat, err := proc.IO(); err == nil {
-		mutils.SetGaugeVecProcIO(virtiofsdIOStat, ioStat)
+	// The following metrics are read from the child process (worker):
+	// - virtiofsd_proc_stat
+	// - virtiofsd_proc_status
+	// - virtiofsd_io_stat
+	// Because virtiofsd forks a child process to handle actual work,
+	// the main process is just a supervisor with minimal CPU/IO activity.
+	childPids, err := getChildPids(*vfsPid)
+	if err == nil && len(childPids) > 0 {
+		childProc, err := procfs.NewProc(childPids[0])
+		if err == nil {
+			if procStat, err := childProc.Stat(); err == nil {
+				mutils.SetGaugeVecProcStat(virtiofsdProcStat, procStat)
+			}
+			if procStatus, err := childProc.NewStatus(); err == nil {
+				mutils.SetGaugeVecProcStatus(virtiofsdProcStatus, procStatus)
+			}
+			if ioStat, err := childProc.IO(); err == nil {
+				mutils.SetGaugeVecProcIO(virtiofsdIOStat, ioStat)
+			}
+		}
+	} else {
+		// Fallback to main process if no child found
+		if procStat, err := proc.Stat(); err == nil {
+			mutils.SetGaugeVecProcStat(virtiofsdProcStat, procStat)
+		}
+		if procStatus, err := proc.NewStatus(); err == nil {
+			mutils.SetGaugeVecProcStatus(virtiofsdProcStatus, procStatus)
+		}
+		if ioStat, err := proc.IO(); err == nil {
+			mutils.SetGaugeVecProcIO(virtiofsdIOStat, ioStat)
+		}
 	}
 
 	return nil

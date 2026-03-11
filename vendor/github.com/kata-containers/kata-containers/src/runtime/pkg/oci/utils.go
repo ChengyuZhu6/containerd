@@ -153,6 +153,24 @@ type RuntimeConfig struct {
 	// any later resource updates.
 	StaticSandboxResourceMgmt bool
 
+	// StaticSandboxResourceScaling enables async resource scaling for static resource management.
+	// When enabled, VM starts with minimal resources and scales up asynchronously.
+	// Agent checks resource availability before creating containers.
+	StaticSandboxResourceScaling bool
+
+	// Determines if enable overhead resource control
+	OverheadResourceEnable bool
+
+	// Overhead cgroup configuration
+	OverheadCPUQuota    int64
+	OverheadCPUPeriod   uint64
+	OverheadMemoryLimit int64
+
+	// Virtiofsd cgroup configuration (creates a sub-cgroup under overhead cgroup)
+	VirtiofsdCPUQuota    int64
+	VirtiofsdCPUPeriod   uint64
+	VirtiofsdMemoryLimit int64
+
 	// Determines if create a netns for hypervisor process
 	DisableNewNetNs bool
 
@@ -164,6 +182,10 @@ type RuntimeConfig struct {
 
 	// Determines if Kata creates emptyDir on the guest
 	DisableGuestEmptyDir bool
+
+	// IgnoreHealthCheckFailure determines if agent health check failure should be ignored
+	// When set to true, agent health check failure will only be logged without killing the sandbox
+	IgnoreHealthCheckFailure bool
 
 	// CreateContainer timeout which, if provided, indicates the createcontainer request timeout
 	// needed for the workload ( Mostly used for pulling images in the guest )
@@ -417,9 +439,11 @@ func SandboxID(spec specs.Spec) (string, error) {
 }
 
 func addAnnotations(ocispec specs.Spec, config *vc.SandboxConfig, runtime RuntimeConfig) error {
-	for key := range ocispec.Annotations {
-		if !checkAnnotationNameIsValid(runtime.HypervisorConfig.EnableAnnotations, key, vcAnnotations.KataAnnotationHypervisorPrefix) {
-			return fmt.Errorf("annotation %v is not enabled", key)
+	if !config.OverheadResourceEnable {
+		for key := range ocispec.Annotations {
+			if !checkAnnotationNameIsValid(runtime.HypervisorConfig.EnableAnnotations, key, vcAnnotations.KataAnnotationHypervisorPrefix) {
+				return fmt.Errorf("annotation %v is not enabled", key)
+			}
 		}
 	}
 
@@ -439,6 +463,22 @@ func addAnnotations(ocispec specs.Spec, config *vc.SandboxConfig, runtime Runtim
 	if err := addAgentConfigOverrides(ocispec, config); err != nil {
 		return err
 	}
+
+	// Pass Kubernetes related annotations to sandbox config
+	kubernetesAnnotations := []string{
+		"io.kubernetes.cri.sandbox-memory",
+		"io.kubernetes.pod.name",
+		"io.kubernetes.pod.namespace",
+		"io.kubernetes.cri.sandbox-name",
+		"io.kubernetes.cri.sandbox-namespace",
+	}
+
+	for _, key := range kubernetesAnnotations {
+		if value, ok := ocispec.Annotations[key]; ok {
+			config.Annotations[key] = value
+		}
+	}
+
 	return nil
 }
 
@@ -1090,6 +1130,16 @@ func addAgentConfigOverrides(ocispec specs.Spec, config *vc.SandboxConfig) error
 
 	config.AgentConfig = c
 
+	// Copy write_cgroup_files annotation to sandbox config (cgroup v2)
+	if value, ok := ocispec.Annotations["io.katacontainers.config.agent.write_cgroup_files"]; ok {
+		config.Annotations["io.katacontainers.config.agent.write_cgroup_files"] = value
+	}
+
+	// Copy write_cgroup_v1_files annotation to sandbox config (cgroup v1)
+	if value, ok := ocispec.Annotations["io.katacontainers.config.agent.write_cgroup_v1_files"]; ok {
+		config.Annotations["io.katacontainers.config.agent.write_cgroup_v1_files"] = value
+	}
+
 	return nil
 }
 
@@ -1136,6 +1186,18 @@ func SandboxConfig(ocispec specs.Spec, runtime RuntimeConfig, bundlePath, cid st
 
 		StaticResourceMgmt: runtime.StaticSandboxResourceMgmt,
 
+		StaticResourceScaling: runtime.StaticSandboxResourceScaling,
+
+		OverheadResourceEnable: runtime.OverheadResourceEnable,
+
+		OverheadCPUQuota:    runtime.OverheadCPUQuota,
+		OverheadCPUPeriod:   runtime.OverheadCPUPeriod,
+		OverheadMemoryLimit: runtime.OverheadMemoryLimit,
+
+		VirtiofsdCPUQuota:    runtime.VirtiofsdCPUQuota,
+		VirtiofsdCPUPeriod:   runtime.VirtiofsdCPUPeriod,
+		VirtiofsdMemoryLimit: runtime.VirtiofsdMemoryLimit,
+
 		ShmSize: shmSize,
 
 		VfioMode: runtime.VfioMode,
@@ -1153,6 +1215,8 @@ func SandboxConfig(ocispec specs.Spec, runtime RuntimeConfig, bundlePath, cid st
 
 		Experimental: runtime.Experimental,
 
+		IgnoreHealthCheckFailure: runtime.IgnoreHealthCheckFailure,
+
 		CreateContainerTimeout: runtime.CreateContainerTimeout,
 
 		ForceGuestPull: runtime.ForceGuestPull,
@@ -1168,19 +1232,35 @@ func SandboxConfig(ocispec specs.Spec, runtime RuntimeConfig, bundlePath, cid st
 	if sandboxConfig.StaticResourceMgmt {
 		sandboxConfig.SandboxResources.BaseCPUs = sandboxConfig.HypervisorConfig.NumVCPUsF
 		sandboxConfig.SandboxResources.BaseMemMB = sandboxConfig.HypervisorConfig.MemorySize
+		if sandboxConfig.StaticResourceScaling {
+			if sandboxConfig.OverheadResourceEnable && sandboxConfig.SandboxResources.WorkloadCPUs > 0 {
+				sandboxConfig.HypervisorConfig.NumVCPUsF = 1
+			}
+		} else {
+			if sandboxConfig.OverheadResourceEnable && sandboxConfig.SandboxResources.WorkloadCPUs > 0 {
+				sandboxConfig.HypervisorConfig.NumVCPUsF = sandboxConfig.SandboxResources.WorkloadCPUs
+			} else {
+				sandboxConfig.HypervisorConfig.NumVCPUsF += sandboxConfig.SandboxResources.WorkloadCPUs
+			}
 
-		sandboxConfig.HypervisorConfig.NumVCPUsF += sandboxConfig.SandboxResources.WorkloadCPUs
-		sandboxConfig.HypervisorConfig.MemorySize += sandboxConfig.SandboxResources.WorkloadMemMB
+			sandboxConfig.HypervisorConfig.MemorySize += sandboxConfig.SandboxResources.WorkloadMemMB
+		}
 
-		sandboxConfig.HypervisorConfig.DefaultMaxVCPUs = sandboxConfig.HypervisorConfig.NumVCPUs()
+		totalVCPUs := sandboxConfig.SandboxResources.BaseCPUs + sandboxConfig.SandboxResources.WorkloadCPUs
+		sandboxConfig.HypervisorConfig.DefaultMaxVCPUs = vc.RoundUpNumVCPUs(totalVCPUs)
+
+		totalMemMB := sandboxConfig.SandboxResources.BaseMemMB + sandboxConfig.SandboxResources.WorkloadMemMB
+		if uint64(totalMemMB) > sandboxConfig.HypervisorConfig.DefaultMaxMemorySize {
+			sandboxConfig.HypervisorConfig.DefaultMaxMemorySize = uint64(totalMemMB)
+		}
 
 		ociLog.WithFields(logrus.Fields{
-			"workload cpu":       sandboxConfig.SandboxResources.WorkloadCPUs,
-			"default cpu":        sandboxConfig.SandboxResources.BaseCPUs,
-			"workload mem in MB": sandboxConfig.SandboxResources.WorkloadMemMB,
-			"default mem":        sandboxConfig.SandboxResources.BaseMemMB,
+			"workload cpu":            sandboxConfig.SandboxResources.WorkloadCPUs,
+			"default cpu":             sandboxConfig.SandboxResources.BaseCPUs,
+			"workload mem in MB":      sandboxConfig.SandboxResources.WorkloadMemMB,
+			"default mem":             sandboxConfig.SandboxResources.BaseMemMB,
+			"static_resource_scaling": sandboxConfig.StaticResourceScaling,
 		}).Debugf("static resources set")
-
 	}
 
 	return sandboxConfig, nil
@@ -1369,6 +1449,7 @@ func CalculateSandboxSizing(spec *specs.Spec) (numCPU float32, memSizeMB uint32)
 	//  Annotations[SandboxCPUQuota] = "220000"
 	// ... to result in VM resources of 1 (MB) for memory, and 3 for CPU (2200 mCPU rounded up to 3).
 	annotation, ok := spec.Annotations[ctrAnnotations.SandboxCPUPeriod]
+	logrus.Infof("SandboxCPUPeriod: %+v", annotation)
 	if ok {
 		period, err = strconv.ParseUint(annotation, 10, 64)
 		if err != nil {

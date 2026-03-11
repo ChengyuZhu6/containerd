@@ -42,6 +42,10 @@ type SandboxState struct {
 	// It can be an empty string if sandbox_cgroup_only is set.
 	OverheadCgroupPath string
 
+	// VirtiofsdCgroupPath is the path to the optional virtiofsd sub-cgroup
+	// under overhead cgroup for dedicated virtiofsd resource control.
+	VirtiofsdCgroupPath string
+
 	// HypervisorState saves hypervisor specific data
 	HypervisorState hv.HypervisorState
 

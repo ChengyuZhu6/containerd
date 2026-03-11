@@ -176,26 +176,35 @@ type hypervisor struct {
 }
 
 type runtime struct {
-	InterNetworkModel         string   `toml:"internetworking_model"`
-	JaegerEndpoint            string   `toml:"jaeger_endpoint"`
-	JaegerUser                string   `toml:"jaeger_user"`
-	JaegerPassword            string   `toml:"jaeger_password"`
-	VfioMode                  string   `toml:"vfio_mode"`
-	GuestSeLinuxLabel         string   `toml:"guest_selinux_label"`
-	SandboxBindMounts         []string `toml:"sandbox_bind_mounts"`
-	Experimental              []string `toml:"experimental"`
-	Tracing                   bool     `toml:"enable_tracing"`
-	DisableNewNetNs           bool     `toml:"disable_new_netns"`
-	DisableGuestSeccomp       bool     `toml:"disable_guest_seccomp"`
-	EnableVCPUsPinning        bool     `toml:"enable_vcpus_pinning"`
-	Debug                     bool     `toml:"enable_debug"`
-	SandboxCgroupOnly         bool     `toml:"sandbox_cgroup_only"`
-	StaticSandboxResourceMgmt bool     `toml:"static_sandbox_resource_mgmt"`
-	EnablePprof               bool     `toml:"enable_pprof"`
-	DisableGuestEmptyDir      bool     `toml:"disable_guest_empty_dir"`
-	CreateContainerTimeout    uint64   `toml:"create_container_timeout"`
-	DanConf                   string   `toml:"dan_conf"`
-	ForceGuestPull            bool     `toml:"experimental_force_guest_pull"`
+	InterNetworkModel            string   `toml:"internetworking_model"`
+	JaegerEndpoint               string   `toml:"jaeger_endpoint"`
+	JaegerUser                   string   `toml:"jaeger_user"`
+	JaegerPassword               string   `toml:"jaeger_password"`
+	VfioMode                     string   `toml:"vfio_mode"`
+	GuestSeLinuxLabel            string   `toml:"guest_selinux_label"`
+	SandboxBindMounts            []string `toml:"sandbox_bind_mounts"`
+	Experimental                 []string `toml:"experimental"`
+	Tracing                      bool     `toml:"enable_tracing"`
+	DisableNewNetNs              bool     `toml:"disable_new_netns"`
+	DisableGuestSeccomp          bool     `toml:"disable_guest_seccomp"`
+	EnableVCPUsPinning           bool     `toml:"enable_vcpus_pinning"`
+	Debug                        bool     `toml:"enable_debug"`
+	SandboxCgroupOnly            bool     `toml:"sandbox_cgroup_only"`
+	StaticSandboxResourceMgmt    bool     `toml:"static_sandbox_resource_mgmt"`
+	StaticSandboxResourceScaling bool     `toml:"static_sandbox_resource_scaling"`
+	OverheadResourceEnable       bool     `toml:"overhead_resource_enable"`
+	OverheadCPUQuota             int64    `toml:"overhead_cpu_quota"`
+	OverheadCPUPeriod            uint64   `toml:"overhead_cpu_period"`
+	OverheadMemoryLimit          int64    `toml:"overhead_memory_limit"`
+	VirtiofsdCPUQuota            int64    `toml:"virtiofsd_cpu_quota"`
+	VirtiofsdCPUPeriod           uint64   `toml:"virtiofsd_cpu_period"`
+	VirtiofsdMemoryLimit         int64    `toml:"virtiofsd_memory_limit"`
+	EnablePprof                  bool     `toml:"enable_pprof"`
+	DisableGuestEmptyDir         bool     `toml:"disable_guest_empty_dir"`
+	IgnoreHealthCheckFailure     bool     `toml:"ignore_health_check_failure"`
+	CreateContainerTimeout       uint64   `toml:"create_container_timeout"`
+	DanConf                      string   `toml:"dan_conf"`
+	ForceGuestPull               bool     `toml:"experimental_force_guest_pull"`
 }
 
 type agent struct {
@@ -1574,6 +1583,14 @@ func LoadConfiguration(configPath string, ignoreLogging bool) (resolvedConfigPat
 	config.EnableVCPUsPinning = tomlConf.Runtime.EnableVCPUsPinning
 	config.GuestSeLinuxLabel = tomlConf.Runtime.GuestSeLinuxLabel
 	config.StaticSandboxResourceMgmt = tomlConf.Runtime.StaticSandboxResourceMgmt
+	config.OverheadResourceEnable = tomlConf.Runtime.OverheadResourceEnable
+	config.StaticSandboxResourceScaling = tomlConf.Runtime.StaticSandboxResourceScaling
+	config.OverheadCPUQuota = tomlConf.Runtime.OverheadCPUQuota
+	config.OverheadCPUPeriod = tomlConf.Runtime.OverheadCPUPeriod
+	config.OverheadMemoryLimit = tomlConf.Runtime.OverheadMemoryLimit
+	config.VirtiofsdCPUQuota = tomlConf.Runtime.VirtiofsdCPUQuota
+	config.VirtiofsdCPUPeriod = tomlConf.Runtime.VirtiofsdCPUPeriod
+	config.VirtiofsdMemoryLimit = tomlConf.Runtime.VirtiofsdMemoryLimit
 	config.SandboxCgroupOnly = tomlConf.Runtime.SandboxCgroupOnly
 	config.DisableNewNetNs = tomlConf.Runtime.DisableNewNetNs
 	config.EnablePprof = tomlConf.Runtime.EnablePprof
@@ -1595,6 +1612,7 @@ func LoadConfiguration(configPath string, ignoreLogging bool) (resolvedConfigPat
 	config.SandboxBindMounts = tomlConf.Runtime.SandboxBindMounts
 
 	config.DisableGuestEmptyDir = tomlConf.Runtime.DisableGuestEmptyDir
+	config.IgnoreHealthCheckFailure = tomlConf.Runtime.IgnoreHealthCheckFailure
 
 	config.DanConfig = tomlConf.Runtime.DanConf
 	if err := checkConfig(config); err != nil {
@@ -1602,6 +1620,10 @@ func LoadConfiguration(configPath string, ignoreLogging bool) (resolvedConfigPat
 	}
 
 	config.ForceGuestPull = tomlConf.Runtime.ForceGuestPull
+
+	if config.StaticSandboxResourceMgmt && config.StaticSandboxResourceScaling {
+		config.AgentConfig.StaticResourceScaling = true
+	}
 
 	return resolved, config, nil
 }
