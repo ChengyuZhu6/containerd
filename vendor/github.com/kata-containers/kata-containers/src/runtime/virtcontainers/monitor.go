@@ -142,6 +142,12 @@ func (m *monitor) stop() {
 func (m *monitor) watchAgent(ctx context.Context) {
 	err := m.sandbox.agent.check(ctx)
 	if err != nil {
+		if m.sandbox.config.IgnoreHealthCheckFailure {
+			// Only log the error, do not notify watchers to avoid killing the sandbox
+			// This prevents business interruption when agent health check fails temporarily
+			monitorLog.WithError(err).Warn("failed to ping agent, but keeping sandbox alive (ignore_health_check_failure=true)")
+			return
+		}
 		// TODO: define and export error types
 		m.notify(ctx, errors.Wrapf(err, "failed to ping agent"))
 	}
@@ -149,6 +155,12 @@ func (m *monitor) watchAgent(ctx context.Context) {
 
 func (m *monitor) watchHypervisor(ctx context.Context) error {
 	if err := m.sandbox.hypervisor.Check(); err != nil {
+		if m.sandbox.config.IgnoreHealthCheckFailure {
+			// Only log the error, do not notify watchers to avoid killing the sandbox
+			// This prevents business interruption when hypervisor process health check fails temporarily
+			monitorLog.WithError(err).Warn("failed to ping hypervisor process, but keeping sandbox alive (ignore_health_check_failure=true)")
+			return nil
+		}
 		m.notify(ctx, errors.Wrapf(err, "failed to ping hypervisor process"))
 		return err
 	}

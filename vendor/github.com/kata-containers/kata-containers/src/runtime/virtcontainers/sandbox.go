@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -170,6 +171,28 @@ type SandboxConfig struct {
 	// StaticResourceMgmt indicates if the shim should rely on statically sizing the sandbox (VM)
 	StaticResourceMgmt bool
 
+	// StaticResourceScaling enables async resource scaling for static resource management.
+	// When enabled, VM starts with minimal resources (Base) and scales up asynchronously to full (Base + Workload).
+	// Agent checks resource availability before creating containers.
+	StaticResourceScaling bool
+
+	// OverheadResourceEnable enables overhead resource control
+	OverheadResourceEnable bool
+
+	// OverheadCPUQuota is the CPU quota for overhead cgroup in microseconds per period
+	OverheadCPUQuota int64
+	// OverheadCPUPeriod is the CPU period for overhead cgroup in microseconds
+	OverheadCPUPeriod uint64
+	// OverheadMemoryLimit is the memory limit for overhead cgroup in bytes
+	OverheadMemoryLimit int64
+
+	// VirtiofsdCPUQuota is the CPU quota for virtiofsd cgroup in microseconds per period
+	VirtiofsdCPUQuota int64
+	// VirtiofsdCPUPeriod is the CPU period for virtiofsd cgroup in microseconds
+	VirtiofsdCPUPeriod uint64
+	// VirtiofsdMemoryLimit is the memory limit for virtiofsd cgroup in bytes
+	VirtiofsdMemoryLimit int64
+
 	// SharePidNs sets all containers to share the same sandbox level pid namespace.
 	SharePidNs bool
 	// SystemdCgroup enables systemd cgroup support
@@ -182,6 +205,10 @@ type SandboxConfig struct {
 
 	// EnableVCPUsPinning controls whether each vCPU thread should be scheduled to a fixed CPU
 	EnableVCPUsPinning bool
+
+	// IgnoreHealthCheckFailure determines if agent health check failure should be ignored
+	// When set to true, agent health check failure will only be logged without killing the sandbox
+	IgnoreHealthCheckFailure bool
 
 	// Create container timeout which, if provided, indicates the create container timeout
 	// needed for the workload(s)
@@ -230,8 +257,9 @@ type Sandbox struct {
 	wg              *sync.WaitGroup
 	cw              *consoleWatcher
 
-	sandboxController  resCtrl.ResourceController
-	overheadController resCtrl.ResourceController
+	sandboxController   resCtrl.ResourceController
+	overheadController  resCtrl.ResourceController
+	virtiofsdController resCtrl.ResourceController
 
 	containers map[string]*Container
 
@@ -256,6 +284,8 @@ type Sandbox struct {
 	// multiple times for hot-plugged network device when Sandbox has multiple
 	// containers.
 	hotplugNetworkConfigApplied bool
+
+	asyncScalingCancel context.CancelFunc
 }
 
 // ID returns the sandbox identifier string.
@@ -873,15 +903,45 @@ func (s *Sandbox) createResourceController() error {
 	// Now that the sandbox resource controller is created, we can set the state controller paths.
 	s.state.SandboxCgroupPath = s.sandboxController.ID()
 	s.state.OverheadCgroupPath = ""
+	s.state.VirtiofsdCgroupPath = ""
 
 	if s.config.SandboxCgroupOnly {
 		s.overheadController = nil
+		s.virtiofsdController = nil
 	} else {
 		// The shim configuration is requesting that we do not put all threads
 		// into the sandbox resource controller.
-		// We're creating an overhead controller, with no constraints. Everything but
+		// We're creating an overhead controller with optional constraints. Everything but
 		// the vCPU threads will eventually make it there.
-		overheadController, err := resCtrl.NewResourceController(fmt.Sprintf("%s%s", resCtrlKataOverheadID, s.id), &specs.LinuxResources{})
+		overheadResources := &specs.LinuxResources{}
+
+		if s.config.OverheadCPUQuota > 0 {
+			period := s.config.OverheadCPUPeriod
+			if period == 0 {
+				period = 100000
+			}
+			quota := s.config.OverheadCPUQuota
+			overheadResources.CPU = &specs.LinuxCPU{
+				Quota:  &quota,
+				Period: &period,
+			}
+		}
+
+		if s.config.OverheadMemoryLimit > 0 {
+			limit := s.config.OverheadMemoryLimit
+			if s.config.Annotations["io.kubernetes.cri.sandbox-memory"] != "" {
+				memory, err := strconv.ParseInt(s.config.Annotations["io.kubernetes.cri.sandbox-memory"], 10, 64)
+				if err != nil {
+					return fmt.Errorf("failed to parse sandbox memory limit: %v", err)
+				}
+				limit += memory
+			}
+			overheadResources.Memory = &specs.LinuxMemory{
+				Limit: &limit,
+			}
+		}
+
+		overheadController, err := resCtrl.NewResourceController(fmt.Sprintf("%s%s", resCtrlKataOverheadID, s.id), overheadResources)
 		// TODO: support systemd cgroups overhead cgroup
 		// https://github.com/kata-containers/kata-containers/issues/2963
 		if err != nil {
@@ -889,6 +949,48 @@ func (s *Sandbox) createResourceController() error {
 		}
 		s.overheadController = overheadController
 		s.state.OverheadCgroupPath = s.overheadController.ID()
+
+		if s.config.OverheadResourceEnable && !resCtrl.IsCgroupV2() {
+			virtiofsdResources := &specs.LinuxResources{}
+
+			if s.config.VirtiofsdCPUQuota > 0 {
+				period := s.config.VirtiofsdCPUPeriod
+				if period == 0 {
+					period = 100000
+				}
+				quota := s.config.VirtiofsdCPUQuota
+				virtiofsdResources.CPU = &specs.LinuxCPU{
+					Quota:  &quota,
+					Period: &period,
+				}
+			}
+
+			if s.config.VirtiofsdMemoryLimit > 0 {
+				limit := s.config.VirtiofsdMemoryLimit
+				virtiofsdResources.Memory = &specs.LinuxMemory{
+					Limit: &limit,
+				}
+			}
+
+			virtiofsdCgroupPath := fmt.Sprintf("%s/virtiofsd", s.state.OverheadCgroupPath)
+			virtiofsdController, err := resCtrl.NewResourceController(virtiofsdCgroupPath, virtiofsdResources)
+			if err != nil {
+				s.Logger().WithError(err).Warn("Failed to create virtiofsd cgroup controller")
+			} else {
+				s.virtiofsdController = virtiofsdController
+				s.state.VirtiofsdCgroupPath = s.virtiofsdController.ID()
+
+				if err := s.virtiofsdController.Update(virtiofsdResources); err != nil {
+					s.Logger().WithError(err).Warn("Failed to update virtiofsd cgroup resources")
+				}
+
+				s.Logger().WithFields(logrus.Fields{
+					"path":         s.state.VirtiofsdCgroupPath,
+					"memory_limit": s.config.VirtiofsdMemoryLimit,
+					"cpu_quota":    s.config.VirtiofsdCPUQuota,
+				}).Info("Created virtiofsd cgroup controller")
+			}
+		}
 	}
 
 	return nil
@@ -1459,6 +1561,20 @@ func (s *Sandbox) startVM(ctx context.Context, prestartHookFunc func(context.Con
 
 	s.Logger().Info("VM started")
 
+	// Add virtiofsd process to dedicated cgroup if enabled
+	if s.virtiofsdController != nil {
+		if vfsPid := s.hypervisor.GetVirtioFsPid(); vfsPid != nil && *vfsPid > 0 {
+			if err := s.virtiofsdController.AddProcess(*vfsPid); err != nil {
+				s.Logger().WithError(err).WithField("pid", *vfsPid).Warn("Failed to add virtiofsd to cgroup")
+			} else {
+				s.Logger().WithFields(logrus.Fields{
+					"pid":    *vfsPid,
+					"cgroup": s.state.VirtiofsdCgroupPath,
+				}).Info("Added virtiofsd to dedicated cgroup")
+			}
+		}
+	}
+
 	if s.cw != nil {
 		s.Logger().Debug("console watcher starts")
 		if err := s.cw.start(s); err != nil {
@@ -1477,6 +1593,14 @@ func (s *Sandbox) startVM(ctx context.Context, prestartHookFunc func(context.Con
 
 	s.Logger().Info("Agent started in the sandbox")
 
+	// Start async resource scaling if enabled
+	// This will hotplug CPU/memory in background without blocking container creation
+	if s.config.StaticResourceMgmt && s.config.StaticResourceScaling {
+		scalingCtx, cancel := context.WithCancel(context.Background())
+		s.asyncScalingCancel = cancel
+		go s.asyncResourceScaling(scalingCtx)
+	}
+
 	defer func() {
 		if err != nil {
 			if e := s.agent.stopSandbox(ctx, s); e != nil {
@@ -1492,6 +1616,13 @@ func (s *Sandbox) startVM(ctx context.Context, prestartHookFunc func(context.Con
 func (s *Sandbox) stopVM(ctx context.Context) error {
 	span, ctx := katatrace.Trace(ctx, s.Logger(), "stopVM", sandboxTracingTags, map[string]string{"sandbox_id": s.id})
 	defer span.End()
+
+	// Cancel async resource scaling if running
+	if s.asyncScalingCancel != nil {
+		s.Logger().Info("Cancelling async resource scaling")
+		s.asyncScalingCancel()
+		s.asyncScalingCancel = nil
+	}
 
 	s.Logger().Info("Stopping sandbox in the VM")
 	if err := s.agent.stopSandbox(ctx, s); err != nil {
@@ -1529,6 +1660,13 @@ func (s *Sandbox) CreateContainer(ctx context.Context, contConfig ContainerConfi
 			}
 		}
 	}()
+
+	if !s.config.NetworkConfig.DisableNewNetwork && s.config.NetworkConfig.NetworkID != "" &&
+		!s.hotplugNetworkConfigApplied {
+		if _, err := s.network.AddEndpoints(ctx, s, nil, true); err != nil {
+			return nil, err
+		}
+	}
 
 	// Create the container object, add devices to the sandbox's device-manager:
 	c, err := newContainer(ctx, s, &s.config.Containers[len(s.config.Containers)-1])
@@ -1780,7 +1918,15 @@ func (s *Sandbox) StatsContainer(ctx context.Context, containerID string) (Conta
 // Stats returns the stats of a running sandbox
 func (s *Sandbox) Stats(ctx context.Context) (SandboxStats, error) {
 
-	metrics, err := s.sandboxController.Stat()
+	// When sandbox_cgroup_only=false, we should read from overheadController instead of sandboxController
+	// because sandboxController only contains vCPU threads, while overheadController contains shim+QEMU
+	controller := s.sandboxController
+	if s.overheadController != nil {
+		controller = s.overheadController
+		virtLog.WithField("sandbox", s.id).Debugf("Stats: using overheadController instead of sandboxController (sandbox_cgroup_only=false)")
+	}
+
+	metrics, err := controller.Stat()
 	if err != nil {
 		return SandboxStats{}, err
 	}
@@ -1792,9 +1938,13 @@ func (s *Sandbox) Stats(ctx context.Context) (SandboxStats, error) {
 	case *v1.Metrics:
 		stats.CgroupStats.CPUStats.CPUUsage.TotalUsage = mt.CPU.Usage.Total
 		stats.CgroupStats.MemoryStats.Usage.Usage = mt.Memory.Usage.Usage
+		virtLog.WithField("sandbox", s.id).Infof("Stats: cgroup v1 memory.usage.usage=%d bytes (%.2f GB) from controller.ID=%s",
+			mt.Memory.Usage.Usage, float64(mt.Memory.Usage.Usage)/1024/1024/1024, controller.ID())
 	case *v2.Metrics:
 		stats.CgroupStats.CPUStats.CPUUsage.TotalUsage = mt.CPU.UsageUsec
 		stats.CgroupStats.MemoryStats.Usage.Usage = mt.Memory.Usage
+		virtLog.WithField("sandbox", s.id).Infof("Stats: cgroup v2 memory.usage=%d bytes (%.2f GB) from controller.ID=%s",
+			mt.Memory.Usage, float64(mt.Memory.Usage)/1024/1024/1024, controller.ID())
 	default:
 		return SandboxStats{}, fmt.Errorf("unknown metrics type %T", mt)
 	}
@@ -2345,6 +2495,197 @@ func (s *Sandbox) updateResources(ctx context.Context) error {
 	return nil
 }
 
+// asyncResourceScaling performs background resource hotplug for static resource scaling.
+// This function runs in a separate goroutine and scales VM resources from Base to Target (Base + Workload).
+// The agent will check resource availability before container creation.
+func (s *Sandbox) asyncResourceScaling(ctx context.Context) {
+	s.Logger().Info("Starting async resource scaling")
+
+	var targetCPUs float32
+	var currentCPUs float32
+
+	if s.config.OverheadResourceEnable && s.config.SandboxResources.WorkloadCPUs > 0 {
+		targetCPUs = s.config.SandboxResources.WorkloadCPUs
+		currentCPUs = 1
+	} else {
+		targetCPUs = s.config.SandboxResources.BaseCPUs + s.config.SandboxResources.WorkloadCPUs
+		currentCPUs = s.config.SandboxResources.BaseCPUs
+	}
+
+	targetMemMB := s.config.SandboxResources.BaseMemMB + s.config.SandboxResources.WorkloadMemMB
+
+	select {
+	case <-ctx.Done():
+		s.Logger().Info("Async resource scaling cancelled before starting")
+		return
+	default:
+	}
+
+	if targetCPUs > currentCPUs {
+		if err := s.asyncScaleCPUs(ctx, targetCPUs); err != nil {
+			if ctx.Err() != nil {
+				s.Logger().Info("Async CPU scaling cancelled")
+				return
+			}
+			s.Logger().WithError(err).Warn("Async CPU scaling failed")
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		s.Logger().Info("Async resource scaling cancelled after CPU scaling")
+		return
+	default:
+	}
+
+	if targetMemMB > s.config.SandboxResources.BaseMemMB {
+		if err := s.asyncScaleMemory(ctx, targetMemMB); err != nil {
+			if ctx.Err() != nil {
+				s.Logger().Info("Async memory scaling cancelled")
+				return
+			}
+			s.Logger().WithError(err).Warn("Async memory scaling failed")
+		}
+	}
+
+	s.Logger().Info("Async resource scaling completed")
+}
+
+// asyncScaleCPUs scales vCPUs to target count in background
+func (s *Sandbox) asyncScaleCPUs(ctx context.Context, targetCPUs float32) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	s.Lock()
+	defer s.Unlock()
+
+	oldCPUs, newCPUs, err := s.hypervisor.ResizeVCPUs(ctx, RoundUpNumVCPUs(targetCPUs))
+	if err != nil {
+		return err
+	}
+
+	if oldCPUs < newCPUs {
+		if err := s.agent.onlineCPUMem(ctx, newCPUs, true); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// asyncScaleMemory scales memory to target size in background, respecting ACPI hotplug limits
+func (s *Sandbox) asyncScaleMemory(ctx context.Context, targetMemMB uint32) error {
+	s.Logger().WithField("target_mem_mb", targetMemMB).Debug("Async scaling memory")
+
+	hconfig := s.hypervisor.HypervisorConfig()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.Logger().Info("Async memory scaling cancelled during iteration")
+			return ctx.Err()
+		default:
+		}
+
+		s.Lock()
+		currentMemoryMB := s.hypervisor.GetTotalMemoryMB(ctx)
+
+		if currentMemoryMB >= targetMemMB {
+			s.Unlock()
+			s.Logger().Debug("Target memory reached")
+			break
+		}
+
+		maxhotPluggableMemoryMB := currentMemoryMB * acpiMemoryHotplugFactor
+
+		if hconfig.VirtioMem {
+			maxhotPluggableMemoryMB = uint32(hconfig.DefaultMaxMemorySize) - currentMemoryMB
+		}
+
+		deltaMB := targetMemMB - currentMemoryMB
+		var newMemoryMB uint32
+
+		if deltaMB > maxhotPluggableMemoryMB {
+			newMemoryMB = currentMemoryMB + maxhotPluggableMemoryMB
+		} else {
+			newMemoryMB = targetMemMB
+		}
+
+		if err := s.updateMemory(ctx, newMemoryMB); err != nil {
+			s.Unlock()
+			return err
+		}
+
+		s.Unlock()
+		s.Logger().WithField("current_mem_mb", newMemoryMB).Debug("Memory batch added")
+	}
+
+	return nil
+}
+
+func (s *Sandbox) UpdateOverheadResources(ctx context.Context, resources *specs.LinuxResources) error {
+	span, _ := katatrace.Trace(ctx, s.Logger(), "UpdateOverheadResources", sandboxTracingTags, map[string]string{"sandbox_id": s.id})
+	defer span.End()
+
+	s.Lock()
+	defer s.Unlock()
+
+	if s.overheadController == nil {
+		return fmt.Errorf("overhead controller is not enabled")
+	}
+
+	logFields := logrus.Fields{
+		"sandbox": s.id,
+	}
+	if resources.CPU != nil {
+		logFields["cpu_cpus"] = resources.CPU.Cpus
+	}
+
+	s.Logger().WithFields(logFields).Info("Updating overhead controller resources")
+
+	// In cgroup v1, when a parent cgroup has child cgroups, we cannot directly
+	// update certain parameters of the parent. We must first update the child cgroups.
+	if !resCtrl.IsCgroupV2() && s.virtiofsdController != nil {
+		var virtiofsdResources *specs.LinuxResources
+
+		if resources.CPU != nil && (resources.CPU.Cpus != "") {
+			if virtiofsdResources == nil {
+				virtiofsdResources = &specs.LinuxResources{}
+			}
+			if virtiofsdResources.CPU == nil {
+				virtiofsdResources.CPU = &specs.LinuxCPU{}
+			}
+			virtiofsdResources.CPU.Cpus = resources.CPU.Cpus
+		}
+
+		if resources.BlockIO != nil {
+			if virtiofsdResources == nil {
+				virtiofsdResources = &specs.LinuxResources{}
+			}
+			virtiofsdResources.BlockIO = resources.BlockIO
+		}
+
+		if virtiofsdResources != nil {
+			if err := s.virtiofsdController.Update(virtiofsdResources); err != nil {
+				s.Logger().WithError(err).Warn("Failed to update virtiofsd cgroup resources, continuing with overhead update")
+			}
+		}
+	}
+
+	if err := s.overheadController.Update(resources); err != nil {
+		return fmt.Errorf("failed to update overhead controller: %w", err)
+	}
+
+	if err := s.storeSandbox(ctx); err != nil {
+		s.Logger().WithError(err).Warn("Failed to persist sandbox state after overhead update")
+	}
+
+	s.Logger().WithFields(logFields).Info("Successfully updated overhead controller resources")
+	return nil
+}
 func (s *Sandbox) prepareEphemeralMounts(memoryMB uint32) ([]*grpc.Storage, error) {
 	tmpfsMounts := []*grpc.Storage{}
 	for _, c := range s.containers {
@@ -2542,32 +2883,65 @@ func (s *Sandbox) resourceControllerDelete() error {
 
 	sandboxController, err := resCtrl.LoadResourceController(s.state.SandboxCgroupPath, s.config.SandboxCgroupOnly)
 	if err != nil {
-		return err
+		s.Logger().WithError(err).Warn("Failed to load sandbox cgroup controller for deletion")
+	} else {
+		resCtrlParent := sandboxController.Parent()
+		if err := sandboxController.MoveTo(resCtrlParent); err != nil {
+			s.Logger().WithError(err).Warn("Failed to move processes from sandbox cgroup")
+		}
+		if err := sandboxController.Delete(); err != nil {
+			s.Logger().WithError(err).Warn("Failed to delete sandbox cgroup")
+		}
+	}
+	// For cgroup v1, force delete to ensure all subsystem directories are removed
+	if !resCtrl.IsCgroupV2() {
+		if err := resCtrl.DeleteCgroupPathV1(s.state.SandboxCgroupPath); err != nil {
+			s.Logger().WithError(err).Warn("Failed to force delete sandbox cgroup path")
+		}
 	}
 
-	resCtrlParent := sandboxController.Parent()
-	if err := sandboxController.MoveTo(resCtrlParent); err != nil {
-		return err
-	}
-
-	if err := sandboxController.Delete(); err != nil {
-		return err
-	}
-
+	s.Logger().Debugf("OverheadCgroupPath = %s", s.state.OverheadCgroupPath)
 	if s.state.OverheadCgroupPath != "" {
+
+		if s.state.VirtiofsdCgroupPath != "" {
+			virtiofsdController, err := resCtrl.LoadResourceController(s.state.VirtiofsdCgroupPath, s.config.SandboxCgroupOnly)
+			if err != nil {
+				s.Logger().WithError(err).Warn("Failed to load virtiofsd cgroup controller for deletion")
+			} else {
+				resCtrlParent := virtiofsdController.Parent()
+				if err := virtiofsdController.MoveTo(resCtrlParent); err != nil {
+					s.Logger().WithError(err).Warn("Failed to move processes from virtiofsd cgroup")
+				}
+				if err := virtiofsdController.Delete(); err != nil {
+					s.Logger().WithError(err).Warn("Failed to delete virtiofsd cgroup")
+				}
+			}
+			if !resCtrl.IsCgroupV2() {
+				if err := resCtrl.DeleteCgroupPathV1(s.state.VirtiofsdCgroupPath); err != nil {
+					s.Logger().WithError(err).Warn("Failed to force delete virtiofsd cgroup path")
+				}
+			}
+			s.Logger().Debug("Virtiofsd cgroup deleted")
+		}
+
 		overheadController, err := resCtrl.LoadResourceController(s.state.OverheadCgroupPath, s.config.SandboxCgroupOnly)
 		if err != nil {
-			return err
+			s.Logger().WithError(err).Warn("Failed to load overhead cgroup controller for deletion")
+		} else {
+			resCtrlParent := overheadController.Parent()
+			if err := overheadController.MoveTo(resCtrlParent); err != nil {
+				s.Logger().WithError(err).Warn("Failed to move processes from overhead cgroup")
+			}
+			if err := overheadController.Delete(); err != nil {
+				s.Logger().WithError(err).Warn("Failed to delete overhead cgroup")
+			}
 		}
-
-		resCtrlParent := overheadController.Parent()
-		if err := s.overheadController.MoveTo(resCtrlParent); err != nil {
-			return err
+		if !resCtrl.IsCgroupV2() {
+			if err := resCtrl.DeleteCgroupPathV1(s.state.OverheadCgroupPath); err != nil {
+				s.Logger().WithError(err).Warn("Failed to force delete overhead cgroup path")
+			}
 		}
-
-		if err := overheadController.Delete(); err != nil {
-			return err
-		}
+		s.Logger().Debug("Overhead cgroup deleted")
 	}
 
 	return nil
@@ -2704,10 +3078,12 @@ func (s *Sandbox) getSandboxCPUSet() (string, string, error) {
 	if s.config == nil {
 		return "", "", nil
 	}
-
 	cpuResult := cpuset.NewCPUSet()
 	memResult := cpuset.NewCPUSet()
 	for _, ctr := range s.config.Containers {
+		if s.config.OverheadResourceEnable && ctr.Annotations[annotations.ContainerTypeKey] != string(PodSandbox) {
+			continue
+		}
 		if ctr.Resources.CPU != nil {
 			currCPUSet, err := cpuset.Parse(ctr.Resources.CPU.Cpus)
 			if err != nil {
@@ -2722,7 +3098,6 @@ func (s *Sandbox) getSandboxCPUSet() (string, string, error) {
 			memResult = memResult.Union(currMemSet)
 		}
 	}
-
 	return cpuResult.String(), memResult.String(), nil
 }
 

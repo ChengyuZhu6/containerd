@@ -301,6 +301,7 @@ func (s *Sandbox) loadState(ss persistapi.SandboxState) {
 	s.state.State = types.StateString(ss.State)
 	s.state.SandboxCgroupPath = ss.SandboxCgroupPath
 	s.state.OverheadCgroupPath = ss.OverheadCgroupPath
+	s.state.VirtiofsdCgroupPath = ss.VirtiofsdCgroupPath
 	s.state.GuestMemoryHotplugProbe = ss.GuestMemoryHotplugProbe
 }
 

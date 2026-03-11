@@ -178,7 +178,7 @@ var vmAddNetPutRequest = func(clh *cloudHypervisor) ([]chclient.PciDeviceInfo, e
 	defer conn.Close()
 
 	for _, netDevice := range *clh.netDevices {
-		clh.Logger().Infof("Adding the net device to the Cloud Hypervisor VM configuration: %+v", netDevice)
+		clh.Logger().WithField("queue", netDevice.NumQueues).Infof("Adding the net device to the Cloud Hypervisor VM configuration: %+v", netDevice)
 
 		netDeviceAsJson, err := json.Marshal(netDevice)
 		if err != nil {
@@ -1626,7 +1626,7 @@ func (clh *cloudHypervisor) isClhRunning(timeout uint) (bool, error) {
 			return false, fmt.Errorf("Failed to connect to API (timeout %ds): %s", timeout, openAPIClientError(err))
 		}
 
-		time.Sleep(time.Duration(10) * time.Millisecond)
+		time.Sleep(time.Duration(1) * time.Millisecond)
 	}
 
 }

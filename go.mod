@@ -10,6 +10,7 @@ require (
 	github.com/Microsoft/hcsshim v0.12.9
 	github.com/containerd/aufs v1.0.0
 	github.com/containerd/btrfs/v2 v2.0.0
+	github.com/containerd/cgroups v1.1.0
 	github.com/containerd/cgroups/v3 v3.0.5
 	github.com/containerd/console v1.0.4
 	github.com/containerd/containerd/api v1.9.0
@@ -99,7 +100,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cilium/ebpf v0.16.0 // indirect
 	github.com/container-orchestrated-devices/container-device-interface v0.6.0 // indirect
-	github.com/containerd/cgroups v1.1.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/typeurl v1.0.3-0.20220422153119-7f6e6d160d67 // indirect
 	github.com/containers/ocicrypt v1.2.1 // indirect
@@ -191,3 +191,5 @@ require (
 // Workaround for indirect dependency no longer being available.
 // https://github.com/containerd/containerd/issues/9969
 exclude github.com/mitchellh/osext v0.0.0-20151018003038-5e2d6d41470f
+
+replace github.com/kata-containers/kata-containers/src/runtime => git.woa.com/tlinux/TSS-tools/kata-containers/src/runtime v0.0.0-20260310074648-f74f5fd30cee

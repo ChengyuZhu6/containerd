@@ -261,6 +261,22 @@ const (
 	// SandboxCgroupOnly is a sandbox annotation that determines if kata processes are managed only in sandbox cgroup.
 	SandboxCgroupOnly = kataAnnotRuntimePrefix + "sandbox_cgroup_only"
 
+	// OverheadResourceEnable is a sandbox annotation that enables overhead resource control
+	// when used together with static_sandbox_resource_mgmt.
+	OverheadResourceEnable = kataAnnotRuntimePrefix + "overhead_resource_enable"
+
+	// VirtiofsdCPUQuota is a sandbox annotation that specifies the CPU quota for virtiofsd cgroup
+	// in microseconds per period. 0 means no limit.
+	VirtiofsdCPUQuota = kataAnnotRuntimePrefix + "virtiofsd_cpu_quota"
+
+	// VirtiofsdCPUPeriod is a sandbox annotation that specifies the CPU period for virtiofsd cgroup
+	// in microseconds. Default is 100000 (100ms).
+	VirtiofsdCPUPeriod = kataAnnotRuntimePrefix + "virtiofsd_cpu_period"
+
+	// VirtiofsdMemoryLimit is a sandbox annotation that specifies the memory limit for virtiofsd cgroup
+	// in bytes. 0 means no limit.
+	VirtiofsdMemoryLimit = kataAnnotRuntimePrefix + "virtiofsd_memory_limit"
+
 	// EnableVCPUsPinning is a sandbox annotation that controls bundling between vCPU threads and CPUs
 	EnableVCPUsPinning = kataAnnotationsPrefix + "enable_vcpus_pinning"
 

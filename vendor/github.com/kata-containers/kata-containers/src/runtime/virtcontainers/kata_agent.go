@@ -147,6 +147,7 @@ const (
 	grpcTtyWinResizeRequest                   = "grpc.TtyWinResizeRequest"
 	grpcWriteStreamRequest                    = "grpc.WriteStreamRequest"
 	grpcCloseStdinRequest                     = "grpc.CloseStdinRequest"
+	grpcExecuteCommandRequest                 = "grpc.ExecuteCommandRequest"
 	grpcStatsContainerRequest                 = "grpc.StatsContainerRequest"
 	grpcPauseContainerRequest                 = "grpc.PauseContainerRequest"
 	grpcResumeContainerRequest                = "grpc.ResumeContainerRequest"
@@ -290,6 +291,9 @@ type KataAgentConfig struct {
 	Trace              bool
 	EnableDebugConsole bool
 	Policy             string
+	// StaticResourceScaling enables async resource scaling mode in agent.
+	// When enabled, agent will check resource availability before container creation.
+	StaticResourceScaling bool
 }
 
 // KataAgentState is the structure describing the data stored from this
@@ -353,6 +357,10 @@ func KataAgentKernelParams(config KataAgentConfig) []Param {
 	if config.CdhApiTimeout > 0 {
 		cdhApiTimeout := strconv.FormatUint(uint64(config.CdhApiTimeout), 10)
 		params = append(params, Param{Key: vcAnnotations.CdhApiTimeoutKernelParam, Value: cdhApiTimeout})
+	}
+
+	if config.StaticResourceScaling {
+		params = append(params, Param{Key: "agent.static_resource_scaling", Value: "true"})
 	}
 
 	return params
@@ -1298,6 +1306,8 @@ func (k *kataAgent) setupNetworks(ctx context.Context, sandbox *Sandbox, c *Cont
 				}
 				ep.SetPciPath(pciPath)
 				endpoints = append(endpoints, ep)
+			} else {
+				endpoints = append(endpoints, ep)
 			}
 		}
 
@@ -1307,6 +1317,9 @@ func (k *kataAgent) setupNetworks(ctx context.Context, sandbox *Sandbox, c *Cont
 			}
 		}()
 	}
+
+	k.Logger().WithField("endpoints", endpoints).Info("endpoints try to add for agent")
+	k.Logger().WithField("sandbox.network.Endpoints", sandbox.network.Endpoints()).Info("endpoints try to add for agent")
 
 	if len(endpoints) == 0 {
 		return nil
@@ -1951,7 +1964,17 @@ func (k *kataAgent) startContainer(ctx context.Context, sandbox *Sandbox, c *Con
 	if err != nil && err.Error() == context.DeadlineExceeded.Error() {
 		return status.Errorf(codes.DeadlineExceeded, "StartContainerRequest timed out")
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Write cgroup files from annotation after container started (cgroup is created)
+	if err := k.writeCgroupFilesFromAnnotation(ctx, sandbox, c); err != nil {
+		k.Logger().WithError(err).Warn("Failed to write cgroup files from annotation")
+		// Don't fail container start, just log the error
+	}
+
+	return nil
 }
 
 func (k *kataAgent) stopContainer(ctx context.Context, sandbox *Sandbox, c Container) error {
@@ -2346,6 +2369,9 @@ func (k *kataAgent) installReqFunc(c *kataclient.AgentClient) {
 	k.reqHandlers[grpcVolumeStatsRequest] = func(ctx context.Context, req interface{}) (interface{}, error) {
 		return k.client.AgentServiceClient.GetVolumeStats(ctx, req.(*grpc.VolumeStatsRequest))
 	}
+	k.reqHandlers[grpcExecuteCommandRequest] = func(ctx context.Context, req interface{}) (interface{}, error) {
+		return k.client.AgentServiceClient.ExecuteCommand(ctx, req.(*grpc.ExecuteCommandRequest))
+	}
 	k.reqHandlers[grpcResizeVolumeRequest] = func(ctx context.Context, req interface{}) (interface{}, error) {
 		return k.client.AgentServiceClient.ResizeVolume(ctx, req.(*grpc.ResizeVolumeRequest))
 	}
@@ -2728,4 +2754,196 @@ func parseErofsRootFsOptions(options []string) []string {
 		}
 	}
 	return lowerdirs
+}
+
+// WriteCgroupFilesAnnotation is the annotation key for specifying cgroup v2 files to write
+const WriteCgroupFilesAnnotation = "io.katacontainers.config.agent.write_cgroup_files"
+
+// WriteCgroupV1FilesAnnotation is the annotation key for specifying cgroup v1 files to write
+// Format: "controller:filename=value,controller:filename=value"
+// Example: "memory:memory.use_priority_oom=1,cpu:cpu.shares=1024"
+const WriteCgroupV1FilesAnnotation = "io.katacontainers.config.agent.write_cgroup_v1_files"
+
+// writeCgroupFilesFromAnnotation parses annotation and writes values to container's cgroup files
+// Supports both cgroup v2 (write_cgroup_files) and cgroup v1 (write_cgroup_v1_files)
+func (k *kataAgent) writeCgroupFilesFromAnnotation(ctx context.Context, sandbox *Sandbox, c *Container) error {
+	if c.config == nil {
+		return nil
+	}
+	// Get container's cgroup path from OCI spec
+	ociSpec := c.GetPatchedOCISpec()
+	if ociSpec == nil || ociSpec.Linux == nil || ociSpec.Linux.CgroupsPath == "" {
+		k.Logger().Warn("Container OCI spec or cgroups path is empty")
+		return nil
+	}
+
+	// Convert cgroups path to filesystem path
+	// systemd format: "system.slice:kata_agent:xxx" -> "system.slice/kata_agent/xxx"
+	// cgroupfs format: "/xxx" -> "xxx"
+	cgroupsPath := ociSpec.Linux.CgroupsPath
+	var cgroupFsPath string
+	if strings.Contains(cgroupsPath, ":") {
+		// systemd cgroup format, convert : to /
+		cgroupFsPath = strings.ReplaceAll(cgroupsPath, ":", "/")
+	} else {
+		// cgroupfs format, remove leading /
+		cgroupFsPath = strings.TrimPrefix(cgroupsPath, "/")
+	}
+
+	k.Logger().WithFields(logrus.Fields{
+		"cgroups_path":   cgroupsPath,
+		"cgroup_fs_path": cgroupFsPath,
+		"container_id":   c.id,
+	}).Debug("Container cgroup path")
+
+	// Process cgroup v2 annotation
+	if writeFilesData, ok := sandbox.config.Annotations[WriteCgroupFilesAnnotation]; ok && writeFilesData != "" {
+		k.Logger().WithField("annotation", writeFilesData).Info("Found write_cgroup_files annotation (cgroup v2)")
+		k.writeCgroupV2Files(ctx, cgroupFsPath, writeFilesData)
+	}
+
+	// Process cgroup v1 annotation
+	if writeFilesData, ok := sandbox.config.Annotations[WriteCgroupV1FilesAnnotation]; ok && writeFilesData != "" {
+		k.Logger().WithField("annotation", writeFilesData).Info("Found write_cgroup_v1_files annotation (cgroup v1)")
+		k.writeCgroupV1Files(ctx, cgroupFsPath, writeFilesData)
+	}
+
+	return nil
+}
+
+// writeCgroupV2Files writes values to cgroup v2 files
+// Path format: /sys/fs/cgroup/{cgroup_path}/{filename}
+// Annotation format: "filename1=value1,filename2=value2"
+func (k *kataAgent) writeCgroupV2Files(ctx context.Context, cgroupFsPath, writeFilesData string) {
+	fullCgroupPath := "/sys/fs/cgroup/" + cgroupFsPath
+
+	pairs := strings.Split(writeFilesData, ",")
+	for _, pair := range pairs {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) != 2 {
+			k.Logger().WithField("pair", pair).Warn("Invalid format, expected filename=value")
+			continue
+		}
+
+		filename := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if strings.Contains(filename, "/") {
+			k.Logger().WithField("filename", filename).Warn("Filename should not contain path separators")
+			continue
+		}
+
+		filePath := fullCgroupPath + "/" + filename
+		k.Logger().WithFields(logrus.Fields{
+			"filename":  filename,
+			"value":     value,
+			"file_path": filePath,
+		}).Info("Writing cgroup v2 file")
+
+		if err := k.writeCgroupFile(ctx, filePath, value); err != nil {
+			k.Logger().WithError(err).WithField("file_path", filePath).Warn("Failed to write cgroup v2 file")
+		}
+	}
+}
+
+// writeCgroupV1Files writes values to cgroup v1 files
+// Path format: /sys/fs/cgroup/{controller}/{cgroup_path}/{filename}
+// Annotation format: "controller:filename=value,controller:filename=value"
+// Example: "memory:memory.use_priority_oom=1,cpu:cpu.shares=1024"
+func (k *kataAgent) writeCgroupV1Files(ctx context.Context, cgroupFsPath, writeFilesData string) {
+	pairs := strings.Split(writeFilesData, ",")
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+
+		// Parse "controller:filename=value"
+		colonIdx := strings.Index(pair, ":")
+		if colonIdx == -1 {
+			k.Logger().WithField("pair", pair).Warn("Invalid cgroup v1 format, expected controller:filename=value")
+			continue
+		}
+
+		controller := strings.TrimSpace(pair[:colonIdx])
+		rest := pair[colonIdx+1:]
+
+		parts := strings.SplitN(rest, "=", 2)
+		if len(parts) != 2 {
+			k.Logger().WithField("pair", pair).Warn("Invalid format, expected controller:filename=value")
+			continue
+		}
+
+		filename := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if strings.Contains(filename, "/") || strings.Contains(controller, "/") {
+			k.Logger().WithFields(logrus.Fields{
+				"controller": controller,
+				"filename":   filename,
+			}).Warn("Controller and filename should not contain path separators")
+			continue
+		}
+
+		// cgroup v1 path: /sys/fs/cgroup/{controller}/{cgroup_path}/{filename}
+		filePath := fmt.Sprintf("/sys/fs/cgroup/%s/%s/%s", controller, cgroupFsPath, filename)
+		k.Logger().WithFields(logrus.Fields{
+			"controller": controller,
+			"filename":   filename,
+			"value":      value,
+			"file_path":  filePath,
+		}).Info("Writing cgroup v1 file")
+
+		if err := k.writeCgroupFile(ctx, filePath, value); err != nil {
+			k.Logger().WithError(err).WithField("file_path", filePath).Warn("Failed to write cgroup v1 file")
+		}
+	}
+}
+
+// writeCgroupFile writes a value to a cgroup file using ExecuteCommandRequest
+func (k *kataAgent) writeCgroupFile(ctx context.Context, filePath, value string) error {
+	// Escape single quotes in value
+	escapedValue := strings.ReplaceAll(value, "'", "'\\''")
+	escapedPath := strings.ReplaceAll(filePath, "'", "'\\''")
+
+	// Use printf to write the value to the file
+	command := fmt.Sprintf("printf '%%s' '%s' > '%s'", escapedValue, escapedPath)
+
+	k.Logger().WithFields(logrus.Fields{
+		"file_path": filePath,
+		"command":   command,
+	}).Debug("Executing command to write cgroup file")
+
+	// Use ExecuteCommandRequest to run the shell command in the guest VM
+	req := &grpc.ExecuteCommandRequest{
+		Command:       "sh",
+		Args:          []string{"-c", command},
+		Env:           []string{},
+		Cwd:           "/",
+		Timeout:       10, // 10 seconds timeout
+		CaptureStdout: true,
+		CaptureStderr: true,
+	}
+
+	// Execute the command
+	result, err := k.sendReq(ctx, req)
+	if err != nil {
+		k.Logger().WithError(err).WithField("file_path", filePath).Warn("Failed to execute command for writing cgroup file")
+		return fmt.Errorf("failed to write cgroup file: %w", err)
+	}
+
+	// Check result
+	if execResult, ok := result.(*grpc.ExecuteCommandResponse); ok {
+		if execResult.ExitCode != 0 {
+			k.Logger().WithFields(logrus.Fields{
+				"file_path": filePath,
+				"exitcode":  execResult.ExitCode,
+				"stderr":    execResult.Stderr,
+			}).Warn("Command execution failed")
+			return fmt.Errorf("failed to write cgroup file, exit code: %d, stderr: %s", execResult.ExitCode, execResult.Stderr)
+		}
+		k.Logger().WithFields(logrus.Fields{
+			"file_path": filePath,
+			"exitcode":  execResult.ExitCode,
+		}).Debug("Command executed successfully")
+	}
+
+	return nil
 }
