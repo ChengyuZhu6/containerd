@@ -263,6 +263,12 @@ func (c *defaultConverter) convertIndex(ctx context.Context, cs content.Store, d
 			}
 			mu.Lock()
 			if newMani != nil {
+				if updated, err := c.updateManifestPlatform(ctx2, cs, mani, *newMani); err != nil {
+					mu.Unlock()
+					return err
+				} else if updated != nil {
+					newMani = updated
+				}
 				ClearGCLabels(labels, mani.Digest)
 				labels[labelKey] = newMani.Digest.String()
 				// NOTE: for keeping manifest order, we specify `i` index explicitly
@@ -270,6 +276,13 @@ func (c *defaultConverter) convertIndex(ctx context.Context, cs content.Store, d
 				modified = true
 			} else {
 				newManifests[i] = mani
+				if updated, err := c.updateManifestPlatform(ctx2, cs, mani, mani); err != nil {
+					mu.Unlock()
+					return err
+				} else if updated != nil {
+					newManifests[i] = *updated
+					modified = true
+				}
 			}
 			mu.Unlock()
 			return nil
@@ -447,4 +460,54 @@ func ClearGCLabels(labels map[string]string, dgst digest.Digest) {
 			delete(labels, k)
 		}
 	}
+}
+
+func (c *defaultConverter) updateManifestPlatform(ctx context.Context, cs content.Store, originalDesc, convertedDesc ocispec.Descriptor) (*ocispec.Descriptor, error) {
+	if !images.IsManifestType(convertedDesc.MediaType) {
+		return nil, nil
+	}
+
+	var manifest ocispec.Manifest
+	if _, err := readJSON(ctx, cs, &manifest, convertedDesc); err != nil {
+		return nil, err
+	}
+	if !manifestRequiresOSFeature(manifest, images.MediaTypeErofsLayer, "erofs") {
+		return nil, nil
+	}
+
+	platformDesc := copyDesc(convertedDesc)
+	platform := platformForDescriptor(originalDesc)
+	if platform == nil {
+		configPlatform, err := images.ConfigPlatform(ctx, cs, manifest.Config)
+		if err != nil {
+			return nil, err
+		}
+		platform = &configPlatform
+	}
+
+	normalized := platforms.Normalize(*platform)
+	normalized.OSFeatures = append(normalized.OSFeatures, "erofs")
+	normalized = platforms.Normalize(normalized)
+	platformDesc.Platform = &normalized
+	return platformDesc, nil
+}
+
+func platformForDescriptor(desc ocispec.Descriptor) *ocispec.Platform {
+	if desc.Platform == nil {
+		return nil
+	}
+	platform := *desc.Platform
+	return &platform
+}
+
+func manifestRequiresOSFeature(manifest ocispec.Manifest, mediaType, feature string) bool {
+	if feature != "erofs" {
+		return false
+	}
+	for _, layer := range manifest.Layers {
+		if layer.MediaType == mediaType {
+			return true
+		}
+	}
+	return false
 }
