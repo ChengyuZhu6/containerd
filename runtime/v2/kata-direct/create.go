@@ -136,6 +136,8 @@ func (s *service) createSandbox(ctx context.Context, id, bundlePath string, ociS
 		WithField("memory_mb", configCopy.SandboxMemMB).
 		Info("sandbox sizing calculated")
 
+	katautils.HandleFactory(s.ctx, s.vci, &configCopy)
+
 	sandbox, _, err := katautils.CreateSandbox(
 		s.ctx,
 		s.vci,
