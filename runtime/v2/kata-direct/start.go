@@ -120,29 +120,12 @@ func (s *service) waitContainerProcess(c *container) {
 }
 
 func (s *service) cleanupAfterExit(c *container) {
-	cleanupCtx, cancel := withCleanupTimeout()
-	defer cancel()
-
 	if c.cType.IsSandbox() {
-		s.log.WithField("container", c.id).Debug("sandbox container exited, stopping sandbox")
-
-		sandbox := s.getSandbox()
-		if sandbox == nil {
-			s.log.WithField("container", c.id).Warn("sandbox already nil during cleanup")
-			return
-		}
-
-		if err := sandbox.Stop(cleanupCtx, true); err != nil {
-			s.log.WithError(err).Warn("failed to stop sandbox")
-		}
-
-		if err := sandbox.Delete(cleanupCtx); err != nil {
-			s.log.WithError(err).Warn("failed to delete sandbox")
-		} else {
-			s.clearSandbox()
-			s.log.Debug("sandbox deleted and reference cleared")
-		}
+		s.log.WithField("container", c.id).Debug("sandbox container exited, delegating to doSandboxCleanup")
+		s.doSandboxCleanup()
 	} else {
+		cleanupCtx, cancel := withCleanupTimeout()
+		defer cancel()
 		sandbox := s.getSandbox()
 		if sandbox != nil {
 			if _, err := sandbox.StopContainer(cleanupCtx, c.id, true); err != nil {

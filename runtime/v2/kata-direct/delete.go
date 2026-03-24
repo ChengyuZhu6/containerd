@@ -22,7 +22,17 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 		return fmt.Errorf("sandbox not found for container %s", c.id)
 	}
 
-	s.log.WithField("container", c.id).WithField("type", c.cType).Info("deleting container")
+	sandboxID := c.id
+	if sandbox != nil {
+		sandboxID = sandbox.ID()
+	}
+
+	s.log.WithField("container", c.id).
+		WithField("type", c.cType).
+		WithField("status", c.status).
+		WithField("sandbox_nil", sandbox == nil).
+		WithField("sandbox_id", sandboxID).
+		Info("deleteContainer: entry state")
 
 	c.ioMu.Lock()
 	if c.ioCancel != nil {
@@ -56,9 +66,18 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 			s.log.WithError(err).Warn("failed to delete container")
 		}
 	} else {
-		c.status = task.Status_STOPPED
-		c.exitTime = time.Now()
-		c.exit = 128 + uint32(unix.SIGKILL)
+		wasAlreadyStopped := (c.status == task.Status_STOPPED)
+
+		s.log.WithField("container", c.id).
+			WithField("sandbox_id", sandboxID).
+			WithField("was_already_stopped", wasAlreadyStopped).
+			Info("deleteContainer: sandbox branch")
+
+		if !wasAlreadyStopped {
+			c.status = task.Status_STOPPED
+			c.exitTime = time.Now()
+			c.exit = 128 + uint32(unix.SIGKILL)
+		}
 
 		ioDone := make(chan struct{})
 		go func() {
@@ -68,15 +87,20 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 
 		select {
 		case <-ioDone:
+			s.log.WithField("container", c.id).Info("deleteContainer: IO drained")
 		case <-time.After(defaultCleanupTimeout):
-			s.log.WithField("container", c.id).Warn("timeout waiting for IO during delete")
+			s.log.WithField("container", c.id).Warn("deleteContainer: timeout waiting for IO during delete")
+		}
+
+		if !wasAlreadyStopped {
+			// Force-delete: process was still running, cleanupAfterExit won't handle this
+			s.log.WithField("sandbox_id", sandboxID).Info("deleteContainer: force delete, performing synchronous sandbox cleanup")
+			s.doSandboxCleanup()
+		} else {
+			s.log.WithField("sandbox_id", sandboxID).Info("deleteContainer: process already exited, sandbox cleanup deferred to cleanupAfterExit")
 		}
 	}
 
-	sandboxID := c.id
-	if sandbox != nil {
-		sandboxID = sandbox.ID()
-	}
 	if err := katautils.PostStopHooks(opCtx, *c.spec, sandboxID, c.bundle); err != nil {
 		s.log.WithError(err).Warn("failed to run post-stop hooks")
 	}
@@ -90,7 +114,7 @@ func (s *service) deleteContainer(ctx context.Context, c *container) error {
 
 	c.closeExitCh()
 
-	s.log.WithField("container", c.id).Info("container deleted successfully")
+	s.log.WithField("container", c.id).Info("deleteContainer: completed")
 
 	return nil
 }

@@ -61,23 +61,25 @@ type serviceOptions struct {
 }
 
 type service struct {
-	mu         sync.RWMutex
-	vci        vc.VC
-	sandbox    vc.VCSandbox
-	config     *oci.RuntimeConfig
-	containers map[string]*container
-	events     chan interface{}
-	id         string
-	namespace  string
-	hpid       uint32
-	ctx        context.Context
-	cancel     context.CancelFunc
-	publisher  shim.Publisher
-	exitCh     chan struct{}
-	cleaned    bool
-	cleanupWg  sync.WaitGroup // Tracks ongoing cleanup operations for orphan resources
-	configPath string
-	log        *logrus.Entry
+	mu                 sync.RWMutex
+	vci                vc.VC
+	sandbox            vc.VCSandbox
+	config             *oci.RuntimeConfig
+	containers         map[string]*container
+	events             chan interface{}
+	id                 string
+	namespace          string
+	hpid               uint32
+	ctx                context.Context
+	cancel             context.CancelFunc
+	publisher          shim.Publisher
+	exitCh             chan struct{}
+	cleaned            bool
+	cleanupWg          sync.WaitGroup // Tracks ongoing cleanup operations for orphan resources
+	sandboxCleanupOnce sync.Once
+	sandboxCleanupDone chan struct{}
+	configPath         string
+	log                *logrus.Entry
 }
 
 type container struct {
@@ -135,6 +137,37 @@ func (s *service) clearSandbox() {
 	s.sandbox = nil
 }
 
+// doSandboxCleanup performs sandbox Stop + Delete exactly once via sync.Once.
+// Multiple call sites (cleanupAfterExit, deleteContainer, Cleanup) can safely
+// invoke this; only the first call executes cleanup, others block until done.
+func (s *service) doSandboxCleanup() {
+	s.sandboxCleanupOnce.Do(func() {
+		defer close(s.sandboxCleanupDone)
+		sandbox := s.getSandbox()
+		if sandbox == nil {
+			s.log.Debug("doSandboxCleanup: sandbox already nil, skipping")
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+		defer cancel()
+
+		s.log.WithField("sandbox_id", sandbox.ID()).Info("doSandboxCleanup: stopping sandbox")
+		if err := sandbox.Stop(ctx, true); err != nil {
+			s.log.WithError(err).Warn("doSandboxCleanup: failed to stop sandbox")
+		}
+		s.log.WithField("sandbox_id", sandbox.ID()).Info("doSandboxCleanup: releasing sandbox (closing watcher/agent)")
+		if err := sandbox.Release(ctx); err != nil {
+			s.log.WithError(err).Warn("doSandboxCleanup: failed to release sandbox")
+		}
+		s.log.WithField("sandbox_id", sandbox.ID()).Info("doSandboxCleanup: deleting sandbox")
+		if err := sandbox.Delete(ctx); err != nil {
+			s.log.WithError(err).Warn("doSandboxCleanup: failed to delete sandbox")
+		}
+		s.clearSandbox()
+		s.log.Info("doSandboxCleanup: sandbox cleanup completed")
+	})
+}
+
 func withOperationTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
@@ -177,19 +210,21 @@ func New(ctx context.Context, id string, publisher shim.Publisher, shutdown func
 	})
 
 	svcCtx, cancel := context.WithCancel(context.Background())
+	svcCtx = namespaces.WithNamespace(svcCtx, ns)
 
 	s := &service{
-		vci:        vci,
-		ctx:        svcCtx,
-		cancel:     cancel,
-		namespace:  ns,
-		id:         id,
-		containers: make(map[string]*container),
-		events:     make(chan interface{}, 128),
-		publisher:  publisher,
-		exitCh:     make(chan struct{}),
-		configPath: opts.configPath,
-		log:        log,
+		vci:                vci,
+		ctx:                svcCtx,
+		cancel:             cancel,
+		namespace:          ns,
+		id:                 id,
+		containers:         make(map[string]*container),
+		events:             make(chan interface{}, 128),
+		publisher:          publisher,
+		exitCh:             make(chan struct{}),
+		sandboxCleanupDone: make(chan struct{}),
+		configPath:         opts.configPath,
+		log:                log,
 	}
 
 	go s.forwardEvents()
@@ -256,13 +291,21 @@ func (s *service) StartShim(ctx context.Context, opts shim.StartOpts) (string, e
 }
 
 func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) {
-	s.log.Info("Cleanup called")
-
 	s.mu.Lock()
+
+	sandboxID := "nil"
+	if s.sandbox != nil {
+		sandboxID = s.sandbox.ID()
+	}
+	s.log.WithField("sandbox_id", sandboxID).
+		WithField("sandbox_nil", s.sandbox == nil).
+		WithField("num_containers", len(s.containers)).
+		WithField("already_cleaned", s.cleaned).
+		Info("Cleanup: entry state")
 
 	if s.cleaned {
 		s.mu.Unlock()
-		s.log.Debug("Cleanup invoked after already completed, waiting for pending cleanups")
+		s.log.Info("Cleanup: already completed, waiting for pending cleanups")
 		s.cleanupWg.Wait()
 		return &taskAPI.DeleteResponse{
 			ExitedAt:   timestamppb.New(time.Now()),
@@ -273,19 +316,18 @@ func (s *service) Cleanup(ctx context.Context) (*taskAPI.DeleteResponse, error) 
 
 	close(s.exitCh)
 
-	if s.sandbox != nil {
-		if err := s.sandbox.Stop(ctx, false); err != nil {
-			s.log.WithError(err).Warn("failed to stop sandbox during cleanup")
-		}
-		if err := s.sandbox.Delete(ctx); err != nil {
-			s.log.WithError(err).Warn("failed to delete sandbox during cleanup")
-		}
-	}
-
 	s.cancel()
 	s.mu.Unlock()
 
+	// Trigger sandbox cleanup asynchronously (fire-and-forget).
+	// doSandboxCleanup uses sync.Once so it's safe even if cleanupAfterExit
+	// already started or completed the cleanup.
+	go s.doSandboxCleanup()
+	s.log.Info("Cleanup: sandbox cleanup triggered (async)")
+
 	s.cleanupWg.Wait()
+
+	s.log.Info("Cleanup: completed")
 
 	return &taskAPI.DeleteResponse{
 		ExitedAt:   timestamppb.New(time.Now()),

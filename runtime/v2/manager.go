@@ -207,10 +207,11 @@ func (m *ShimManager) RegisterBuiltinRuntime(name string, p interface{}) {
 
 // builtinShimWrapper wraps a builtin shim service to implement ShimInstance
 type builtinShimWrapper struct {
-	Shim   shimbinary.Shim
-	id     string
-	ns     string
-	bundle string
+	Shim      shimbinary.Shim
+	id        string
+	ns        string
+	bundle    string
+	bundleRef *Bundle
 }
 
 func (b *builtinShimWrapper) ID() string {
@@ -236,11 +237,22 @@ func (b *builtinShimWrapper) Client() any {
 
 func (b *builtinShimWrapper) Delete(ctx context.Context) error {
 	_, err := b.Shim.Cleanup(ctx)
+	if b.bundleRef != nil {
+		if bundleErr := b.bundleRef.Delete(); bundleErr != nil {
+			log.G(ctx).WithField("id", b.id).WithError(bundleErr).Warn("failed to delete bundle")
+		}
+	}
 	return err
 }
 
 func (b *builtinShimWrapper) Close() error {
-	_, err := b.Shim.Cleanup(context.Background())
+	ctx := context.Background()
+	_, err := b.Shim.Cleanup(ctx)
+	if b.bundleRef != nil {
+		if bundleErr := b.bundleRef.Delete(); bundleErr != nil {
+			log.G(ctx).WithField("id", b.id).WithError(bundleErr).Warn("failed to delete bundle")
+		}
+	}
 	return err
 }
 
@@ -293,10 +305,11 @@ func (m *ShimManager) Start(ctx context.Context, id string, opts runtime.CreateO
 
 		// Wrap it as ShimInstance
 		builtinShim := &builtinShimWrapper{
-			Shim:   shimService,
-			id:     id,
-			ns:     ns,
-			bundle: bundle.Path,
+			Shim:      shimService,
+			id:        id,
+			ns:        ns,
+			bundle:    bundle.Path,
+			bundleRef: bundle,
 		}
 
 		// Add to shims map
