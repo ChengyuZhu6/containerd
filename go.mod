@@ -192,4 +192,4 @@ require (
 // https://github.com/containerd/containerd/issues/9969
 exclude github.com/mitchellh/osext v0.0.0-20151018003038-5e2d6d41470f
 
-replace github.com/kata-containers/kata-containers/src/runtime => git.woa.com/tlinux/TSS-tools/kata-containers/src/runtime v0.0.0-20260310074648-f74f5fd30cee
+replace github.com/kata-containers/kata-containers/src/runtime => git.woa.com/tlinux/TSS-tools/kata-containers/src/runtime v0.0.0-20260325060745-336585e30703

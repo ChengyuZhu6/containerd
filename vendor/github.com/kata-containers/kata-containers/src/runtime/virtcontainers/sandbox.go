@@ -1572,6 +1572,22 @@ func (s *Sandbox) startVM(ctx context.Context, prestartHookFunc func(context.Con
 					"cgroup": s.state.VirtiofsdCgroupPath,
 				}).Info("Added virtiofsd to dedicated cgroup")
 			}
+
+			childPids, err := getChildPids(*vfsPid)
+			if err != nil {
+				s.Logger().WithError(err).WithField("pid", *vfsPid).Warn("Failed to get virtiofsd child pids")
+			}
+			for _, childPid := range childPids {
+				if err := s.virtiofsdController.AddProcess(childPid); err != nil {
+					s.Logger().WithError(err).WithField("pid", childPid).Warn("Failed to add virtiofsd child to cgroup")
+				} else {
+					s.Logger().WithFields(logrus.Fields{
+						"pid":    childPid,
+						"parent": *vfsPid,
+						"cgroup": s.state.VirtiofsdCgroupPath,
+					}).Info("Added virtiofsd child process to dedicated cgroup")
+				}
+			}
 		}
 	}
 
@@ -1709,6 +1725,12 @@ func (s *Sandbox) CreateContainer(ctx context.Context, contConfig ContainerConfi
 		return nil, err
 	}
 
+	if s.overheadController != nil {
+		if err = s.constrainHypervisor(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	if err = s.checkVCPUsPinning(ctx); err != nil {
 		return nil, err
 	}
@@ -1821,6 +1843,12 @@ func (s *Sandbox) DeleteContainer(ctx context.Context, containerID string) (VCCo
 		return nil, err
 	}
 
+	if s.overheadController != nil {
+		if err = s.constrainHypervisor(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	if err = s.checkVCPUsPinning(ctx); err != nil {
 		return nil, err
 	}
@@ -1888,6 +1916,12 @@ func (s *Sandbox) UpdateContainer(ctx context.Context, containerID string, resou
 
 	if err := s.resourceControllerUpdate(ctx); err != nil {
 		return err
+	}
+
+	if s.overheadController != nil {
+		if err := s.constrainHypervisor(ctx); err != nil {
+			return err
+		}
 	}
 
 	if err = s.checkVCPUsPinning(ctx); err != nil {
@@ -2002,26 +2036,42 @@ func (s *Sandbox) createContainers(ctx context.Context) error {
 	span, ctx := katatrace.Trace(ctx, s.Logger(), "createContainers", sandboxTracingTags, map[string]string{"sandbox_id": s.id})
 	defer span.End()
 
+	// Step 1: Update cgroup cpuset first (very fast, ~21us).
+	// This must complete before constrainHypervisor can move threads.
+	if err := s.resourceControllerUpdate(ctx); err != nil {
+		return err
+	}
+
+	// Step 2: Start constrainHypervisor asynchronously (~10ms AddThread).
+	// It runs in parallel with c.create() which includes sendReq(CreateContainerRequest) (~19ms).
+	constrainCh := s.constrainHypervisorAsync(ctx)
+
+	// Step 3: Create containers (includes gRPC CreateContainerRequest, the main bottleneck).
 	for i := range s.config.Containers {
 		c, err := newContainer(ctx, s, &s.config.Containers[i])
 		if err != nil {
+			<-constrainCh
 			return err
 		}
 		if err := c.create(ctx); err != nil {
+			<-constrainCh
 			return err
 		}
 
 		if err := s.addContainer(c); err != nil {
+			<-constrainCh
 			return err
 		}
 	}
 
-	// Update resources after having added containers to the sandbox, since
-	// container status is required to know if more resources should be added.
+	// Step 4: Update resources (may resize vCPUs).
 	if err := s.updateResources(ctx); err != nil {
+		<-constrainCh
 		return err
 	}
-	if err := s.resourceControllerUpdate(ctx); err != nil {
+
+	// Step 5: Wait for async constrainHypervisor to finish.
+	if err := <-constrainCh; err != nil {
 		return err
 	}
 
@@ -2032,6 +2082,7 @@ func (s *Sandbox) createContainers(ctx context.Context) error {
 	if err := s.storeSandbox(ctx); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -2845,10 +2896,9 @@ func (s *Sandbox) GetHypervisorType() string {
 }
 
 // resourceControllerUpdate updates the sandbox cpuset resource controller
-// (Linux cgroup) subsystem.
-// Also, if the sandbox has an overhead controller, it updates the hypervisor
-// constraints by moving the potentially new vCPU threads back to the sandbox
-// controller.
+// (Linux cgroup) subsystem. It only updates the cpuset/memset, without
+// moving vCPU threads. The caller is responsible for calling
+// constrainHypervisor separately (sync or async) when needed.
 func (s *Sandbox) resourceControllerUpdate(ctx context.Context) error {
 	cpuset, memset, err := s.getSandboxCPUSet()
 	if err != nil {
@@ -2860,16 +2910,22 @@ func (s *Sandbox) resourceControllerUpdate(ctx context.Context) error {
 		return err
 	}
 
-	if s.overheadController != nil {
-		// If we have an overhead controller, new vCPU threads would start there,
-		// as being children of the VMM PID.
-		// We need to constrain them by moving them into the sandbox controller.
-		if err := s.constrainHypervisor(ctx); err != nil {
-			return err
-		}
-	}
-
 	return nil
+}
+
+// constrainHypervisorAsync starts constrainHypervisor in a goroutine and returns a channel
+// to receive the result. This allows the caller to overlap constrainHypervisor (~10ms AddThread)
+// with other work such as sendReq(CreateContainerRequest).
+func (s *Sandbox) constrainHypervisorAsync(ctx context.Context) <-chan error {
+	ch := make(chan error, 1)
+	if s.overheadController == nil {
+		ch <- nil
+		return ch
+	}
+	go func() {
+		ch <- s.constrainHypervisor(ctx)
+	}()
+	return ch
 }
 
 // resourceControllerDelete will move the running processes in the sandbox resource

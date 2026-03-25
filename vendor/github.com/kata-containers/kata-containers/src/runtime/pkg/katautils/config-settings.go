@@ -15,34 +15,34 @@ import (
 )
 
 // name is the name of the runtime
-var NAME = "kata-runtime"
+var NAME = "@RUNTIME_NAME@"
 
 // name of the project
-const PROJECT = "Kata Containers"
+const PROJECT = "@PROJECT_NAME@"
 
 // prefix used to denote non-standard CLI commands and options.
-const PROJECTPREFIX = "kata"
+const PROJECTPREFIX = "@PROJECT_TYPE@"
 
 // original URL for this project
-const PROJECTURL = "https://github.com/kata-containers"
+const PROJECTURL = "@PROJECT_URL@"
 
 // Project URL's organisation name
-const PROJECTORG = "kata-containers"
+const PROJECTORG = "@PROJECT_ORG@"
 
-const DEFAULTROOTDIRECTORY = "/run/kata-containers"
+const DEFAULTROOTDIRECTORY = "@PKGRUNDIR@"
 
 // commit is the git commit the runtime is compiled from.
-var COMMIT = "unknown"
+var COMMIT = "@COMMIT@"
 
 // version is the runtime version.
-var VERSION = "0.0.0"
+var VERSION = "@VERSION@"
 
 // Default config file used by stateless systems.
-var DEFAULTRUNTIMECONFIGURATION = "/etc/kata-containers/configuration.toml"
+var DEFAULTRUNTIMECONFIGURATION = "@CONFIG_PATH@"
 
 // Alternate config file that takes precedence over
 // defaultRuntimeConfiguration.
-var DEFAULTSYSCONFRUNTIMECONFIGURATION = "/usr/share/defaults/kata-containers/configuration.toml"
+var DEFAULTSYSCONFRUNTIMECONFIGURATION = "@SYSCONFIG@"
 var defaultHypervisorPath = "/usr/bin/qemu-system-x86_64"
 var defaultJailerPath = "/usr/bin/jailer"
 var defaultImagePath = "/usr/share/kata-containers/kata-containers.img"
@@ -108,7 +108,7 @@ const defaultTemplatePath string = "/run/vc/vm/template"
 const defaultVMCacheEndpoint string = "/var/run/kata-containers/cache.sock"
 
 // Default config file used by stateless systems.
-var defaultRuntimeConfiguration = "/etc/kata-containers/configuration.toml"
+var defaultRuntimeConfiguration = "@CONFIG_PATH@"
 
 const defaultHotPlugVFIO = config.NoPort
 const defaultColdPlugVFIO = config.NoPort
