@@ -582,6 +582,19 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 
 		parent := obkt.Get(bucketKeyParent)
+
+		// Handle rebase: if base.Parent is specified and the active snapshot
+		// has no parent, allow setting a new parent during commit.
+		var rebase bool
+		if base.Parent != "" {
+			if len(parent) > 0 {
+				return fmt.Errorf("cannot rebase snapshot %q with existing parent %q: %w",
+					key, string(parent), errdefs.ErrInvalidArgument)
+			}
+			parent = []byte(base.Parent)
+			rebase = true
+		}
+
 		if len(parent) > 0 {
 			pbkt := bkt.Bucket(parent)
 			if pbkt == nil {
@@ -592,8 +605,10 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			if err != nil {
 				return err
 			}
-			if err := cbkt.Delete([]byte(key)); err != nil {
-				return err
+			if !rebase {
+				if err := cbkt.Delete([]byte(key)); err != nil {
+					return err
+				}
 			}
 			if err := cbkt.Put([]byte(name), nil); err != nil {
 				return err
@@ -620,13 +635,25 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 		inheritedOpt := snapshots.WithLabels(snapshots.FilterInheritedLabels(base.Labels))
 
+		commitOpts := []snapshots.Opt{inheritedOpt}
+		if rebase {
+			// Map the metadata-level parent name (chainID) to the
+			// backend-level nameKey that the underlying snapshotter uses.
+			pbkt := bkt.Bucket(parent)
+			if pbkt == nil {
+				return fmt.Errorf("parent snapshot %v does not exist for rebase: %w", string(parent), errdefs.ErrNotFound)
+			}
+			bparent := string(pbkt.Get(bucketKeyName))
+			commitOpts = append(commitOpts, snapshots.WithParent(bparent))
+		}
+
 		// NOTE: Backend snapshotters should commit fast and reliably to
 		// prevent metadata store locking and minimizing rollbacks.
 		// This operation should be done in the transaction to minimize the
 		// risk of the committed keys becoming out of sync. If this operation
 		// succeed and the overall transaction fails then the risk of out of
 		// sync data is higher and may require manual cleanup.
-		if err := s.Snapshotter.Commit(ctx, nameKey, bkey, inheritedOpt); err != nil {
+		if err := s.Snapshotter.Commit(ctx, nameKey, bkey, commitOpts...); err != nil {
 			if errdefs.IsNotFound(err) {
 				log.G(ctx).WithField("snapshotter", s.name).WithField("key", key).WithError(err).Error("uncommittable snapshot: missing in backend, snapshot should be removed")
 			}

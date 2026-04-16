@@ -64,6 +64,7 @@ func init() {
 			var lc local.TransferConfig
 			lc.MaxConcurrentDownloads = config.MaxConcurrentDownloads
 			lc.MaxConcurrentUploadedLayers = config.MaxConcurrentUploadedLayers
+			lc.MaxConcurrentUnpacks = config.MaxConcurrentUnpacks
 			for _, uc := range config.UnpackConfiguration {
 				p, err := platforms.Parse(uc.Platform)
 				if err != nil {
@@ -117,11 +118,21 @@ func init() {
 					return nil, fmt.Errorf("no matching diff plugins: %w", errdefs.ErrNotFound)
 				}
 
+				// Look up snapshotter capabilities
+				var snCapabilities []string
+				snPlugins, err := ic.GetByType(plugin.SnapshotPlugin)
+				if err == nil {
+					if snPlugin, ok := snPlugins[uc.Snapshotter]; ok {
+						snCapabilities = snPlugin.Meta.Capabilities
+					}
+				}
+
 				up := unpack.Platform{
-					Platform:       target,
-					SnapshotterKey: uc.Snapshotter,
-					Snapshotter:    sn,
-					Applier:        applier,
+					Platform:                target,
+					SnapshotterKey:          uc.Snapshotter,
+					Snapshotter:             sn,
+					Applier:                 applier,
+					SnapshotterCapabilities: snCapabilities,
 				}
 				lc.UnpackPlatforms = append(lc.UnpackPlatforms, up)
 			}
@@ -138,6 +149,11 @@ type transferConfig struct {
 
 	// MaxConcurrentUploadedLayers is the max concurrent uploads for push
 	MaxConcurrentUploadedLayers int `toml:"max_concurrent_uploaded_layers"`
+
+	// MaxConcurrentUnpacks controls the number of concurrent layer unpack
+	// operations. When set to a value greater than 1 and the snapshotter
+	// supports "rebase", parallel unpack is enabled.
+	MaxConcurrentUnpacks int `toml:"max_concurrent_unpacks"`
 
 	// UnpackConfiguration is used to read config from toml
 	UnpackConfiguration []unpackConfiguration `toml:"unpack_config"`
@@ -161,6 +177,7 @@ func defaultConfig() *transferConfig {
 	return &transferConfig{
 		MaxConcurrentDownloads:      3,
 		MaxConcurrentUploadedLayers: 3,
+		MaxConcurrentUnpacks:        1,
 		UnpackConfiguration: []unpackConfiguration{
 			{
 				Platform:    platforms.Format(platforms.DefaultSpec()),

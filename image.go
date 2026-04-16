@@ -316,6 +316,10 @@ type UnpackConfig struct {
 	// in-flight fetch request or unpack handler for a given descriptor's
 	// digest or chain ID.
 	DuplicationSuppressor kmutex.KeyedLocker
+	// Limiter is used to limit the number of concurrent unpack operations.
+	// When set together with a snapshotter that supports rebase, enables
+	// parallel unpack of image layers.
+	Limiter *semaphore.Weighted
 }
 
 // UnpackOpt provides configuration for unpack
@@ -341,6 +345,14 @@ func WithUnpackDuplicationSuppressor(suppressor kmutex.KeyedLocker) UnpackOpt {
 func WithUnpackApplyOpts(opts ...diff.ApplyOpt) UnpackOpt {
 	return func(ctx context.Context, uc *UnpackConfig) error {
 		uc.ApplyOpts = append(uc.ApplyOpts, opts...)
+		return nil
+	}
+}
+
+// WithUnpackLimiter sets a concurrency limiter for parallel unpack operations.
+func WithUnpackLimiter(l *semaphore.Weighted) UnpackOpt {
+	return func(ctx context.Context, uc *UnpackConfig) error {
+		uc.Limiter = l
 		return nil
 	}
 }

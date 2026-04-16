@@ -379,6 +379,16 @@ func WithLabels(labels map[string]string) Opt {
 	}
 }
 
+// WithParent sets the parent for a snapshot commit.
+// When used with Commit, this allows changing the parent of an active
+// snapshot that was created without a parent (rebase).
+func WithParent(parent string) Opt {
+	return func(info *Info) error {
+		info.Parent = parent
+		return nil
+	}
+}
+
 // FilterInheritedLabels filters the provided labels by removing any key which
 // isn't a snapshot label. Snapshot labels have a prefix of "containerd.io/snapshot/"
 // or are the "containerd.io/snapshot.ref" label.

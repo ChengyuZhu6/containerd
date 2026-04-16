@@ -377,6 +377,17 @@ func CommitActive(ctx context.Context, key, name string, usage snapshots.Usage, 
 		if si.Kind != snapshots.KindActive {
 			return fmt.Errorf("snapshot %q is not active: %w", key, errdefs.ErrFailedPrecondition)
 		}
+
+		// Handle rebase: allow setting parent on commit if snapshot was
+		// created without a parent. This enables parallel unpack where
+		// layers are prepared without parent and rebased on commit.
+		if base.Parent != "" {
+			if si.Parent != "" {
+				return fmt.Errorf("cannot rebase snapshot %q with existing parent %q: %w", key, si.Parent, errdefs.ErrInvalidArgument)
+			}
+			si.Parent = base.Parent
+		}
+
 		si.Kind = snapshots.KindCommitted
 		si.Created = time.Now().UTC()
 		si.Updated = si.Created

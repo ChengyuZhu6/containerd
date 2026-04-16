@@ -42,6 +42,8 @@ type localTransferService struct {
 	limiterU *semaphore.Weighted
 	// limiter for download operation
 	limiterD *semaphore.Weighted
+	// limiter for parallel unpack operations
+	limiterP *semaphore.Weighted
 	config   TransferConfig
 }
 
@@ -57,6 +59,9 @@ func NewTransferService(lm leases.Manager, cs content.Store, is images.Store, tc
 	}
 	if tc.MaxConcurrentDownloads > 0 {
 		ts.limiterD = semaphore.NewWeighted(int64(tc.MaxConcurrentDownloads))
+	}
+	if tc.MaxConcurrentUnpacks > 1 {
+		ts.limiterP = semaphore.NewWeighted(int64(tc.MaxConcurrentUnpacks))
 	}
 	return ts
 }
@@ -164,6 +169,10 @@ type TransferConfig struct {
 	MaxConcurrentDownloads int
 	// MaxConcurrentUploadedLayers is the max concurrent uploads for push
 	MaxConcurrentUploadedLayers int
+	// MaxConcurrentUnpacks controls the number of concurrent layer unpack
+	// operations. When set to a value greater than 1 and the snapshotter
+	// supports "rebase", parallel unpack is enabled.
+	MaxConcurrentUnpacks int
 
 	// DuplicationSuppressor is used to make sure that there is only one
 	// in-flight fetch request or unpack handler for a given descriptor's

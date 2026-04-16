@@ -142,6 +142,7 @@ func (p *proxySnapshotter) Commit(ctx context.Context, name, key string, opts ..
 		Name:        name,
 		Key:         key,
 		Labels:      local.Labels,
+		Parent:      local.Parent,
 	})
 	return errdefs.FromGRPC(err)
 }

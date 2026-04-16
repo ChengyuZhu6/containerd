@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/semaphore"
 
@@ -101,13 +102,18 @@ func (c *Client) Pull(ctx context.Context, ref string, opts ...RemoteOpt) (_ Ima
 		}
 
 		// Check client Unpack config
+		snCapabilities, err := c.GetSnapshotterCapabilities(ctx, snapshotterName)
+		if err != nil {
+			log.G(ctx).WithError(err).Warnf("failed to get snapshotter capabilities for %s", snapshotterName)
+		}
 		platform := unpack.Platform{
-			Platform:       platformMatcher,
-			SnapshotterKey: snapshotterName,
-			Snapshotter:    c.SnapshotService(snapshotterName),
-			SnapshotOpts:   append(pullCtx.SnapshotterOpts, uconfig.SnapshotOpts...),
-			Applier:        c.DiffService(),
-			ApplyOpts:      uconfig.ApplyOpts,
+			Platform:                platformMatcher,
+			SnapshotterKey:          snapshotterName,
+			Snapshotter:             c.SnapshotService(snapshotterName),
+			SnapshotOpts:            append(pullCtx.SnapshotterOpts, uconfig.SnapshotOpts...),
+			Applier:                 c.DiffService(),
+			ApplyOpts:               uconfig.ApplyOpts,
+			SnapshotterCapabilities: snCapabilities,
 		}
 		uopts := []unpack.UnpackerOpt{unpack.WithUnpackPlatform(platform)}
 		if pullCtx.MaxConcurrentDownloads > 0 {
@@ -115,6 +121,9 @@ func (c *Client) Pull(ctx context.Context, ref string, opts ...RemoteOpt) (_ Ima
 		}
 		if uconfig.DuplicationSuppressor != nil {
 			uopts = append(uopts, unpack.WithDuplicationSuppressor(uconfig.DuplicationSuppressor))
+		}
+		if uconfig.Limiter != nil {
+			uopts = append(uopts, unpack.WithUnpackLimiter(uconfig.Limiter))
 		}
 		unpacker, err = unpack.NewUnpacker(ctx, c.ContentStore(), uopts...)
 		if err != nil {

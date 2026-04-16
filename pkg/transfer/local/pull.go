@@ -169,6 +169,10 @@ func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetch
 				uopts = append(uopts, unpack.WithLimiter(ts.limiterD))
 			}
 
+			if ts.limiterP != nil {
+				uopts = append(uopts, unpack.WithUnpackLimiter(ts.limiterP))
+			}
+
 			if ts.config.DuplicationSuppressor != nil {
 				uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
 			}

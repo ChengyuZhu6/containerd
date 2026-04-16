@@ -58,6 +58,7 @@ func MetaStoreSuite(t *testing.T, name string, meta func(root string) (*MetaStor
 	t.Run("RemoveNotExist", makeTest(t, name, meta, inWriteTransaction(testRemoveNotExist)))
 	t.Run("RemoveWithChildren", makeTest(t, name, meta, inWriteTransaction(testRemoveWithChildren)))
 	t.Run("ParentIDs", makeTest(t, name, meta, inWriteTransaction(testParents)))
+	t.Run("Rebase", makeTest(t, name, meta, inWriteTransaction(testRebase)))
 }
 
 // makeTest creates a testsuite with a writable transaction
@@ -638,5 +639,64 @@ func testParents(ctx context.Context, t *testing.T, ms *MetaStore) {
 			}
 
 		}
+	}
+}
+
+func testRebase(ctx context.Context, t *testing.T, ms *MetaStore) {
+	// Create a committed parent snapshot
+	_, err := CreateSnapshot(ctx, snapshots.KindActive, "parent-active", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = CommitActive(ctx, "parent-active", "parent-committed", snapshots.Usage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an active snapshot without parent
+	_, err = CreateSnapshot(ctx, snapshots.KindActive, "orphan-active", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit with rebase: set parent during commit
+	_, err = CommitActive(ctx, "orphan-active", "rebased-committed", snapshots.Usage{},
+		snapshots.WithParent("parent-committed"))
+	if err != nil {
+		t.Fatalf("Failed to commit with rebase: %v", err)
+	}
+
+	// Verify the committed snapshot has the correct parent
+	_, info, _, err := GetInfo(ctx, "rebased-committed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Parent != "parent-committed" {
+		t.Fatalf("Expected parent 'parent-committed', got %q", info.Parent)
+	}
+
+	// Test that rebase on snapshot with existing parent fails
+	_, err = CreateSnapshot(ctx, snapshots.KindActive, "child-active", "parent-committed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = CommitActive(ctx, "child-active", "child-committed", snapshots.Usage{},
+		snapshots.WithParent("rebased-committed"))
+	if err == nil {
+		t.Fatal("Expected error when rebasing snapshot with existing parent")
+	}
+	if !errors.Is(err, errdefs.ErrInvalidArgument) {
+		t.Fatalf("Expected ErrInvalidArgument, got: %v", err)
+	}
+
+	// Test rebase with non-existent parent fails
+	_, err = CreateSnapshot(ctx, snapshots.KindActive, "orphan-active-2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = CommitActive(ctx, "orphan-active-2", "rebased-committed-2", snapshots.Usage{},
+		snapshots.WithParent("does-not-exist"))
+	if err == nil {
+		t.Fatal("Expected error when rebasing with non-existent parent")
 	}
 }
