@@ -329,19 +329,48 @@ func applyFlags(cliContext *cli.Context, config *srvconfig.Config) error {
 		grpcConfig["address"] = s
 		config.Plugins["io.containerd.server.v1.grpc"] = grpcConfig
 
-		_, ok = config.Plugins["io.containerd.server.v1.ttrpc"]
+		// The --address flag must take precedence over any ttrpc address
+		// derived during config migration. serviceMigrate derives the ttrpc
+		// address from the legacy [grpc] address as `<grpc>.ttrpc`, so a
+		// pre-existing config.toml carrying [grpc] address =
+		// "/run/containerd/containerd.sock" will leave the ttrpc plugin
+		// block pinned to "/run/containerd/containerd.sock.ttrpc" even when
+		// the user starts containerd with `--address` pointing elsewhere
+		// (e.g. rootless, XDG_RUNTIME_DIR).
+		//
+		// Since c15ec2485 the grpc and ttrpc listeners live in independent
+		// server plugins started serially in Server.Start; ttrpc happens to
+		// run before grpc. If the rootless user cannot create
+		// /run/containerd/, ttrpc fails with
+		//   failed to get listener for main ttrpc endpoint: mkdir
+		//   /run/containerd: permission denied
+		// and Server.Start returns early, so the gRPC socket is never
+		// created. From the client side this surfaces as
+		//   lstat /run/containerd/containerd.sock: no such file or directory
+		// even though clients (e.g. nerdctl) only ever talk to the gRPC
+		// socket. Forcing the ttrpc address to follow --address keeps both
+		// listeners on the user-controlled path and avoids the failure.
+		v, ok = config.Plugins["io.containerd.server.v1.ttrpc"]
 		if !ok {
-			ttrpcConfig = map[string]any{
-				"address": s + ".ttrpc",
-			}
+			ttrpcConfig = make(map[string]any)
+		} else if ttrpcConfig, ok = v.(map[string]any); !ok {
+			return fmt.Errorf("ttrpc plugin has invalid configuration: %w", errdefs.ErrInvalidArgument)
+		}
+		ttrpcConfig["address"] = s + ".ttrpc"
+		// Inherit uid/gid from the grpc plugin config when ttrpc has no
+		// explicit ownership configured, mirroring the legacy behavior of
+		// deriving ttrpc settings from the [grpc] section.
+		if _, ok := ttrpcConfig["uid"]; !ok {
 			if uid, ok := grpcConfig["uid"]; ok {
 				ttrpcConfig["uid"] = uid
 			}
+		}
+		if _, ok := ttrpcConfig["gid"]; !ok {
 			if gid, ok := grpcConfig["gid"]; ok {
 				ttrpcConfig["gid"] = gid
 			}
-			config.Plugins["io.containerd.server.v1.ttrpc"] = ttrpcConfig
 		}
+		config.Plugins["io.containerd.server.v1.ttrpc"] = ttrpcConfig
 	}
 
 	applyPlatformFlags(cliContext)
