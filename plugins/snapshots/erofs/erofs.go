@@ -583,6 +583,7 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		snap     storage.Snapshot
 		td, path string
 		info     snapshots.Info
+		mounts   []mount.Mount
 	)
 
 	// Only parentless extractions can be served: s.mounts picks a staged blob up
@@ -686,12 +687,13 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			return fmt.Errorf("failed to rename: %w", err)
 		}
 		td = ""
-		return nil
+		mounts, err = s.mounts(snap, info)
+		return err
 	}); err != nil {
 		return nil, err
 	}
 
-	return s.mounts(snap, info)
+	return mounts, nil
 }
 
 func (s *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
