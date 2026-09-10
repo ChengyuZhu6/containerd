@@ -341,6 +341,12 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 }
 
 func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, bool) {
+	// A merged fsmeta is generated independently from the committed layer blobs
+	// and is not protected by their fs-verity state. Fall back to mounting and
+	// verifying each layer when fs-verity enforcement is enabled.
+	if s.enableFsverity {
+		return mount.Mount{}, false
+	}
 	mergedMeta := s.fsMetaPath(snap.ParentIDs[id])
 	if fi, err := os.Stat(mergedMeta); err != nil || fi.Size() == 0 {
 		return mount.Mount{}, false
@@ -399,6 +405,10 @@ func (s *snapshotter) applyDmverityPolicy(layerBlob string) (string, error) {
 // createErofsMount creates a mount specification for an EROFS layer.
 // Applies dmverityMode policy and passes it to the mount handler.
 func (s *snapshotter) createErofsMount(layerBlob string) (mount.Mount, error) {
+	if err := s.verifyFsverity(layerBlob); err != nil {
+		return mount.Mount{}, err
+	}
+
 	options := []string{"ro", "loop"}
 
 	if dmverityOpt, err := s.applyDmverityPolicy(layerBlob); err != nil {
@@ -419,11 +429,6 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 
 	if len(snap.ParentIDs) == 0 {
 		if layerBlob, err := s.lowerPath(snap.ID); err == nil {
-			if s.enableFsverity {
-				if err := s.verifyFsverity(layerBlob); err != nil {
-					return nil, err
-				}
-			}
 			m, err := s.createErofsMount(layerBlob)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create erofs mount: %w", err)

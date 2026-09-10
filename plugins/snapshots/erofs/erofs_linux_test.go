@@ -260,6 +260,22 @@ func TestErofsFsverity(t *testing.T) {
 	}
 }
 
+func TestMountsRejectParentWithoutFsverity(t *testing.T) {
+	root := t.TempDir()
+	s := &snapshotter{root: root, enableFsverity: true}
+	for _, id := range []string{"parent-1", "parent-2"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "snapshots", id), 0700))
+		require.NoError(t, os.WriteFile(s.layerBlobPath(id), []byte(id), 0600))
+	}
+
+	_, err := s.mounts(storage.Snapshot{
+		Kind:      snapshots.KindActive,
+		ID:        "active",
+		ParentIDs: []string{"parent-1", "parent-2"},
+	}, snapshots.Info{})
+	require.ErrorContains(t, err, "fsverity is not enabled")
+}
+
 func TestErofsDifferWithTarIndexMode(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := context.Background()
