@@ -94,6 +94,7 @@ func initCRIService(ic *plugin.InitContext) (any, error) {
 	if err := validateRuntimePlatforms(runtimeConfig.Runtimes, imageConfig.RuntimePlatforms); err != nil {
 		return nil, err
 	}
+	imageSvc.UpdateDefaultRuntimeName(runtimeConfig.DefaultRuntimeName)
 	for runtimeName, rt := range runtimeConfig.Runtimes {
 		var imagePlatform *images.ImagePlatform
 		if rt.Snapshotter != "" {
