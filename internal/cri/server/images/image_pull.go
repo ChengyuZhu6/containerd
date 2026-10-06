@@ -218,7 +218,8 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		// No need to use `updateImage`, because the image reference must
 		// have been managed by the cri plugin.
 		// TODO: Use image service directly
-		if err := c.imageStore.Update(ctx, r); err != nil {
+		// TODO: Use the runtime handler and platform resolved for the request.
+		if err := c.imageStore.Update(ctx, r, "", platforms.Default()); err != nil {
 			return "", fmt.Errorf("failed to update image store %q: %w", r, err)
 		}
 	}
@@ -460,7 +461,7 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 		}
 		// If the image is not found, we should continue updating the cache,
 		// so that the image can be removed from the cache.
-		if err := c.imageStore.Update(ctx, r); err != nil {
+		if err := c.imageStore.Update(ctx, r, "", platforms.Default()); err != nil {
 			return fmt.Errorf("update image store for %q: %w", r, err)
 		}
 		return nil
@@ -480,7 +481,7 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 			if err := c.createOrUpdateImageReference(ctx, id, img.Target(), criLabels); err != nil {
 				return fmt.Errorf("create image id reference %q: %w", id, err)
 			}
-			if err := c.imageStore.Update(ctx, id); err != nil {
+			if err := c.imageStore.Update(ctx, id, "", platforms.Default()); err != nil {
 				return fmt.Errorf("update image store for %q: %w", id, err)
 			}
 			// The image id is ready, add the label to mark the image as managed.
@@ -490,7 +491,7 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 			break
 		}
 	}
-	if err := c.imageStore.Update(ctx, r); err != nil {
+	if err := c.imageStore.Update(ctx, r, "", platforms.Default()); err != nil {
 		return fmt.Errorf("update image store for %q: %w", r, err)
 	}
 	return nil

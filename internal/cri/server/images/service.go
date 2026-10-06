@@ -136,7 +136,7 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 		config:                      config,
 		images:                      options.Images,
 		client:                      options.Client,
-		imageStore:                  imagestore.NewStore(options.Images, options.Content, platforms.Default()),
+		imageStore:                  imagestore.NewStore(options.Images, options.Content),
 		imageFSPaths:                options.ImageFSPaths,
 		runtimePlatforms:            options.RuntimePlatforms,
 		snapshotStore:               snapshotstore.NewStore(),
@@ -223,7 +223,7 @@ func (c *CRIImageService) LocalResolve(refOrID string) (imagestore.Image, error)
 			if err != nil {
 				return ""
 			}
-			id, err := c.imageStore.Resolve(normalized.String())
+			id, err := c.imageStore.Resolve(normalized.String(), "")
 			if err != nil {
 				return ""
 			}
@@ -236,7 +236,7 @@ func (c *CRIImageService) LocalResolve(refOrID string) (imagestore.Image, error)
 		// Try to treat ref as imageID
 		imageID = refOrID
 	}
-	return c.imageStore.Get(imageID)
+	return c.imageStore.Get(imageID, "")
 }
 
 // RuntimeSnapshotter overrides the default snapshotter if Snapshotter is set for this runtime.
@@ -253,7 +253,7 @@ func (c *CRIImageService) RuntimeSnapshotter(ctx context.Context, ociRuntime cri
 
 // GetImage gets image metadata by image id.
 func (c *CRIImageService) GetImage(id string) (imagestore.Image, error) {
-	return c.imageStore.Get(id)
+	return c.imageStore.Get(id, "")
 }
 
 // GetSnapshot returns the snapshot with specified key.
