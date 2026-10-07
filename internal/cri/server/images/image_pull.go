@@ -187,10 +187,11 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		image       containerd.Image
 		bytesPulled uint64
 	)
-	if c.config.UseLocalImagePull {
-		image, bytesPulled, err = c.pullImageWithLocalPull(ctx, ref, credentials, snapshotter, labels, imagePullProgressTimeout)
+	useLocal := c.useLocalPull(ctx, runtime.Platform, snapshotter)
+	if useLocal {
+		image, bytesPulled, err = c.pullImageWithLocalPull(ctx, ref, credentials, snapshotter, runtime.Platform, labels, imagePullProgressTimeout)
 	} else {
-		image, bytesPulled, err = c.pullImageWithTransferService(ctx, ref, credentials, snapshotter, labels, imagePullProgressTimeout)
+		image, bytesPulled, err = c.pullImageWithTransferService(ctx, ref, credentials, snapshotter, runtime.Platform, labels, imagePullProgressTimeout)
 	}
 
 	if err != nil {
@@ -218,8 +219,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		// No need to use `updateImage`, because the image reference must
 		// have been managed by the cri plugin.
 		// TODO: Use image service directly
-		// TODO: Use the runtime handler and platform resolved for the request.
-		if err := c.imageStore.Update(ctx, r, "", platforms.Default()); err != nil {
+		if err := c.imageStore.Update(ctx, r, runtime.Name, platforms.Only(runtime.Platform)); err != nil {
 			return "", fmt.Errorf("failed to update image store %q: %w", r, err)
 		}
 	}
@@ -244,6 +244,35 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 
 // pullImageWithLocalPull handles image pulling using the local client.
 //
+// unpackSupportChecker is implemented by transfer services which can report
+// whether they are configured to unpack for a platform and snapshotter.
+type unpackSupportChecker interface {
+	SupportsUnpack(ctx context.Context, platform imagespec.Platform, snapshotter string) bool
+}
+
+// useLocalPull returns whether the image should be pulled with the local client
+// instead of the transfer service. The transfer service can only unpack for the
+// platform and snapshotter combinations it is configured for, so an unsupported
+// combination falls back to the local client which can unpack into any
+// registered snapshotter.
+func (c *CRIImageService) useLocalPull(ctx context.Context, platform imagespec.Platform, snapshotter string) bool {
+	if c.config.UseLocalImagePull {
+		return true
+	}
+	checker, ok := c.transferrer.(unpackSupportChecker)
+	if !ok {
+		return false
+	}
+	if checker.SupportsUnpack(ctx, platform, snapshotter) {
+		return false
+	}
+	log.G(ctx).WithFields(log.Fields{
+		"platform":    platforms.FormatAll(platform),
+		"snapshotter": snapshotter,
+	}).Debug("transfer service does not support unpack configuration, using local pull")
+	return true
+}
+
 // The returned bytesPulled is the number of bytes actually fetched from the
 // registry — cached layers are not counted because they never trigger an
 // HTTP request.
@@ -252,6 +281,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 	ref string,
 	credentials func(string) (string, string, error),
 	snapshotter string,
+	platform imagespec.Platform,
 	labels map[string]string,
 	imagePullProgressTimeout time.Duration,
 ) (containerd.Image, uint64, error) {
@@ -267,6 +297,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 	pullOpts := []containerd.RemoteOpt{
 		containerd.WithResolver(resolver),
 		containerd.WithPullSnapshotter(snapshotter),
+		containerd.WithPlatform(platforms.FormatAll(platform)),
 		containerd.WithPullUnpack,
 		containerd.WithPullLabels(labels),
 		containerd.WithDownloadLimiter(c.downloadLimiter),
@@ -310,6 +341,7 @@ func (c *CRIImageService) pullImageWithTransferService(
 	ref string,
 	credentials func(string) (string, string, error),
 	snapshotter string,
+	platform imagespec.Platform,
 	labels map[string]string,
 	imagePullProgressTimeout time.Duration,
 ) (containerd.Image, uint64, error) {
@@ -320,8 +352,8 @@ func (c *CRIImageService) pullImageWithTransferService(
 
 	// Set image store opts
 	sopts := []transferimage.StoreOpt{
-		transferimage.WithPlatforms(platforms.DefaultSpec()),
-		transferimage.WithUnpack(platforms.DefaultSpec(), snapshotter),
+		transferimage.WithPlatforms(platform),
+		transferimage.WithUnpack(platform, snapshotter),
 		transferimage.WithImageLabels(labels),
 	}
 
@@ -350,7 +382,7 @@ func (c *CRIImageService) pullImageWithTransferService(
 	}
 
 	// Image should be pulled, unpacked and present in containerd image store at this moment
-	image, err := c.client.GetImage(ctx, ref)
+	image, err := c.client.GetImageWithPlatform(ctx, ref, platforms.Only(platform))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get image %q from containerd image store: %w", ref, err)
 	}

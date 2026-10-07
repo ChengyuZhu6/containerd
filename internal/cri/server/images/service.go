@@ -45,7 +45,23 @@ import (
 type imageClient interface {
 	ListImages(context.Context, ...string) ([]containerd.Image, error)
 	GetImage(context.Context, string) (containerd.Image, error)
+	GetImageWithPlatform(context.Context, string, platforms.MatchComparer) (containerd.Image, error)
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
+}
+
+// ImageClient adds a platform-specific image lookup to the containerd client.
+// An image pulled for a runtime platform may differ from the client default, so
+// it must be resolved for the platform it was pulled for.
+type ImageClient struct {
+	*containerd.Client
+}
+
+func (c *ImageClient) GetImageWithPlatform(ctx context.Context, ref string, platform platforms.MatchComparer) (containerd.Image, error) {
+	i, err := c.ImageService().Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return containerd.NewImageWithPlatform(c.Client, i, platform), nil
 }
 
 type ImagePlatform struct {
@@ -92,7 +108,7 @@ type RuntimeHandler struct {
 	// for the default runtime handler.
 	Name string
 	// Platform is the platform used to resolve and unpack images.
-	Platform platforms.MatchComparer
+	Platform imagespec.Platform
 	// Snapshotter is the snapshotter used to unpack images.
 	Snapshotter string
 }
@@ -197,11 +213,11 @@ func (c *CRIImageService) resolveRuntimeHandler(runtimeHandler string) (RuntimeH
 	}
 	h := RuntimeHandler{
 		Name:        runtimeHandler,
-		Platform:    platforms.Default(),
+		Platform:    platforms.DefaultSpec(),
 		Snapshotter: c.config.Snapshotter,
 	}
 	if p, ok := c.runtimePlatforms[name]; ok && p != nil {
-		h.Platform = platforms.Only(p.Platform)
+		h.Platform = p.Platform
 		if p.Snapshotter != "" {
 			h.Snapshotter = p.Snapshotter
 		}

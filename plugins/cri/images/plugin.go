@@ -112,7 +112,7 @@ func init() {
 				return nil, fmt.Errorf("unable to init client for cri image service: %w", err)
 			}
 			options.Images = ctrdCli.ImageService()
-			options.Client = ctrdCli
+			options.Client = &images.ImageClient{Client: ctrdCli}
 
 			allSnapshotters := mdb.Snapshotters()
 			defaultSnapshotter := config.Snapshotter

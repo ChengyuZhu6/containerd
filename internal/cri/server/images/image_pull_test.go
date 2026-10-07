@@ -29,6 +29,7 @@ import (
 	"github.com/containerd/platforms"
 
 	"github.com/containerd/containerd/v2/core/transfer"
+	"github.com/containerd/containerd/v2/core/transfer/local"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/labels"
@@ -410,10 +411,10 @@ func TestResolveRequestRuntimeHandler(t *testing.T) {
 			expectedSnapshotter: runtimeSnapshotter,
 		},
 		{
-			desc:                "should reject unknown runtime handler",
-			podSandboxConfig:    &runtime.PodSandboxConfig{},
-			runtimeHandler:      "runtime-not-exists",
-			expectedErr:         true,
+			desc:             "should reject unknown runtime handler",
+			podSandboxConfig: &runtime.PodSandboxConfig{},
+			runtimeHandler:   "runtime-not-exists",
+			expectedErr:      true,
 		},
 		{
 			desc: "should fall back to annotation when runtimeHandler is empty",
@@ -452,6 +453,72 @@ func TestResolveRequestRuntimeHandler(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedHandler, h.Name)
 			assert.Equal(t, tt.expectedSnapshotter, h.Snapshotter)
+		})
+	}
+}
+
+// The fallback to local pull relies on a type assertion, verify the transfer
+// service satisfies it so the fallback cannot silently stop working.
+func TestTransferServiceUnpackSupportChecker(t *testing.T) {
+	if _, ok := local.NewTransferService(nil, nil, local.TransferConfig{}).(unpackSupportChecker); !ok {
+		t.Fatal("transfer service does not implement unpackSupportChecker")
+	}
+}
+
+type fakeTransferrer struct {
+	supports bool
+}
+
+func (f *fakeTransferrer) Transfer(context.Context, any, any, ...transfer.Opt) error { return nil }
+
+// fakeChecker is only satisfied when embedding is used, so the type assertion
+// path used by the fallback can be exercised.
+type fakeChecker struct {
+	*fakeTransferrer
+}
+
+func (f *fakeChecker) SupportsUnpack(context.Context, ocispec.Platform, string) bool {
+	return f.supports
+}
+
+func TestUseLocalPull(t *testing.T) {
+	platform := platforms.MustParse("linux/amd64")
+
+	for _, tt := range []struct {
+		name        string
+		useLocalCfg bool
+		transferrer transfer.Transferrer
+		expected    bool
+	}{
+		{
+			name:        "local pull configured",
+			useLocalCfg: true,
+			transferrer: &fakeChecker{fakeTransferrer: &fakeTransferrer{supports: true}},
+			expected:    true,
+		},
+		{
+			name:        "transfer supports unpack",
+			transferrer: &fakeChecker{fakeTransferrer: &fakeTransferrer{supports: true}},
+			expected:    false,
+		},
+		{
+			name:        "transfer does not support unpack",
+			transferrer: &fakeChecker{fakeTransferrer: &fakeTransferrer{supports: false}},
+			expected:    true,
+		},
+		{
+			name:        "transferrer without capability check",
+			transferrer: &fakeTransferrer{supports: false},
+			expected:    false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cri, _ := newTestCRIService()
+			cri.config.UseLocalImagePull = tt.useLocalCfg
+			cri.transferrer = tt.transferrer
+			if got := cri.useLocalPull(context.Background(), platform, "overlayfs"); got != tt.expected {
+				t.Fatalf("expect useLocalPull %v, got %v", tt.expected, got)
+			}
 		})
 	}
 }

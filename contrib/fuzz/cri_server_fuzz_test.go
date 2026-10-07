@@ -52,7 +52,7 @@ func FuzzCRIServer(f *testing.F) {
 		imageConfig := criconfig.ImageConfig{}
 
 		imageService, err := images.NewService(imageConfig, &images.CRIImageServiceOptions{
-			Client: client,
+			Client: &images.ImageClient{Client: client},
 		})
 		if err != nil {
 			t.Fatal(err)

@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/containerd/errdefs"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -63,6 +64,13 @@ func NewTransferService(cs content.Store, is images.Store, tc TransferConfig) tr
 		ts.limiterP = semaphore.NewWeighted(int64(tc.MaxConcurrentUnpacks))
 	}
 	return ts
+}
+
+// SupportsUnpack returns whether the transfer service is configured to unpack
+// for the given platform and snapshotter.
+func (ts *localTransferService) SupportsUnpack(ctx context.Context, p ocispec.Platform, snapshotter string) bool {
+	ok, _ := getSupportedPlatform(ctx, transfer.UnpackConfiguration{Platform: p, Snapshotter: snapshotter}, ts.config.UnpackPlatforms)
+	return ok
 }
 
 func (ts *localTransferService) Transfer(ctx context.Context, src any, dest any, opts ...transfer.Opt) error {
