@@ -453,6 +453,7 @@ func unpackToProto(uc []transfer.UnpackConfiguration) []*transfertypes.UnpackCon
 			OS:           uc[i].Platform.OS,
 			Architecture: uc[i].Platform.Architecture,
 			Variant:      uc[i].Platform.Variant,
+			OSVersion:    uc[i].Platform.OSVersion,
 			OSFeatures:   uc[i].Platform.OSFeatures,
 		}
 		auc[i] = &transfertypes.UnpackConfiguration{
@@ -471,6 +472,7 @@ func unpackFromProto(auc []*transfertypes.UnpackConfiguration) []transfer.Unpack
 			uc[i].Platform.OS = auc[i].Platform.OS
 			uc[i].Platform.Architecture = auc[i].Platform.Architecture
 			uc[i].Platform.Variant = auc[i].Platform.Variant
+			uc[i].Platform.OSVersion = auc[i].Platform.OSVersion
 			uc[i].Platform.OSFeatures = auc[i].Platform.OSFeatures
 		}
 	}

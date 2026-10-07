@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/transfer"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -496,4 +498,24 @@ func (is *simpleImageStore) Delete(ctx context.Context, name string, opts ...ima
 	delete(is.images, name)
 
 	return nil
+}
+
+func TestUnpackConfigurationOSVersion(t *testing.T) {
+	uc := []transfer.UnpackConfiguration{
+		{
+			Platform:    platforms.MustParse("windows(10.0.20348)/amd64"),
+			Snapshotter: "windows-lcow",
+		},
+	}
+
+	got := unpackFromProto(unpackToProto(uc))
+	if len(got) != 1 {
+		t.Fatalf("expect 1 unpack configuration, got %d", len(got))
+	}
+	if got[0].Platform.OSVersion != uc[0].Platform.OSVersion {
+		t.Fatalf("expect OSVersion %q, got %q", uc[0].Platform.OSVersion, got[0].Platform.OSVersion)
+	}
+	if got[0].Snapshotter != uc[0].Snapshotter {
+		t.Fatalf("expect snapshotter %q, got %q", uc[0].Snapshotter, got[0].Snapshotter)
+	}
 }
