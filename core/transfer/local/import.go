@@ -26,6 +26,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -34,6 +35,22 @@ import (
 )
 
 func (ts *localTransferService) importStream(ctx context.Context, i transfer.ImageImporter, is transfer.ImageStorer, tops *transfer.Config) error {
+	// First find suitable platforms to unpack into
+	// If image storer is also an unpacker type, i.e implemented UnpackPlatforms() func
+	var unpacks []unpack.Platform
+	if iu, ok := is.(transfer.ImageUnpacker); ok {
+		for _, u := range iu.UnpackPlatforms() {
+			matched, mu := getSupportedPlatform(ctx, u, ts.config.UnpackPlatforms)
+			if !matched {
+				// Return an error instead of silently skipping the unpack,
+				// otherwise the caller gets an image which is not unpacked.
+				return fmt.Errorf("unpack configuration not supported (platform=%q, snapshotter=%q): %w",
+					platforms.FormatAll(u.Platform), u.Snapshotter, errdefs.ErrInvalidArgument)
+			}
+			unpacks = append(unpacks, mu)
+		}
+	}
+
 	ctx, done, err := ts.withLease(ctx)
 	if err != nil {
 		return err
@@ -89,28 +106,20 @@ func (ts *localTransferService) importStream(ctx context.Context, i transfer.Ima
 
 	handler = images.Handlers(handlerFunc)
 
-	// First find suitable platforms to unpack into
-	// If image storer is also an unpacker type, i.e implemented UnpackPlatforms() func
-	if iu, ok := is.(transfer.ImageUnpacker); ok {
-		unpacks := iu.UnpackPlatforms()
-		if len(unpacks) > 0 {
-			uopts := []unpack.UnpackerOpt{}
-			for _, u := range unpacks {
-				matched, mu := getSupportedPlatform(ctx, u, ts.config.UnpackPlatforms)
-				if matched {
-					uopts = append(uopts, unpack.WithUnpackPlatform(mu))
-				}
-			}
-
-			if ts.config.DuplicationSuppressor != nil {
-				uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
-			}
-			unpacker, err = unpack.NewUnpacker(ctx, ts.content, uopts...)
-			if err != nil {
-				return fmt.Errorf("unable to initialize unpacker: %w", err)
-			}
-			handler = unpacker.Unpack(handler)
+	if len(unpacks) > 0 {
+		uopts := []unpack.UnpackerOpt{}
+		for _, mu := range unpacks {
+			uopts = append(uopts, unpack.WithUnpackPlatform(mu))
 		}
+
+		if ts.config.DuplicationSuppressor != nil {
+			uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
+		}
+		unpacker, err = unpack.NewUnpacker(ctx, ts.content, uopts...)
+		if err != nil {
+			return fmt.Errorf("unable to initialize unpacker: %w", err)
+		}
+		handler = unpacker.Unpack(handler)
 	}
 
 	if err := images.WalkNotEmpty(ctx, handler, index); err != nil {

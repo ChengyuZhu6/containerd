@@ -17,10 +17,14 @@
 package local
 
 import (
+	"context"
 	"testing"
 
 	"github.com/containerd/platforms"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/transfer"
 	"github.com/containerd/containerd/v2/core/unpack"
 	"github.com/containerd/containerd/v2/defaults"
@@ -150,4 +154,68 @@ func TestGetSupportedPlatform(t *testing.T) {
 		})
 	}
 
+}
+
+// unsupportedUnpackStore requests an unpack configuration which the transfer
+// service is not configured for, and records whether the source was consumed.
+type recordingSource struct {
+	consumed bool
+}
+
+func (r *recordingSource) Resolve(context.Context) (string, ocispec.Descriptor, error) {
+	r.consumed = true
+	return "", ocispec.Descriptor{}, nil
+}
+
+func (r *recordingSource) Fetcher(context.Context, string) (transfer.Fetcher, error) {
+	return nil, nil
+}
+
+func (r *recordingSource) Import(context.Context, content.Store) (ocispec.Descriptor, error) {
+	r.consumed = true
+	return ocispec.Descriptor{}, nil
+}
+
+func (r *recordingSource) Store(context.Context, ocispec.Descriptor, images.Store) ([]images.Image, error) {
+	return nil, nil
+}
+
+func (r *recordingSource) UnpackPlatforms() []transfer.UnpackConfiguration {
+	return []transfer.UnpackConfiguration{{
+		Platform:    platforms.MustParse("linux/amd64"),
+		Snapshotter: "devmapper",
+	}}
+}
+
+func TestUnsupportedUnpackConfigurationBeforeConsumingSource(t *testing.T) {
+	ts := &localTransferService{
+		config: TransferConfig{
+			UnpackPlatforms: []unpack.Platform{
+				{
+					Platform:       platforms.Only(platforms.MustParse("linux/amd64")),
+					SnapshotterKey: defaults.DefaultSnapshotter,
+				},
+			},
+		},
+	}
+
+	t.Run("pull", func(t *testing.T) {
+		src := &recordingSource{}
+		if err := ts.pull(t.Context(), src, src, &transfer.Config{}); err == nil {
+			t.Fatal("expect error for unsupported unpack configuration")
+		}
+		if src.consumed {
+			t.Fatal("source was consumed before validating the unpack configuration")
+		}
+	})
+
+	t.Run("import", func(t *testing.T) {
+		src := &recordingSource{}
+		if err := ts.importStream(t.Context(), src, src, &transfer.Config{}); err == nil {
+			t.Fatal("expect error for unsupported unpack configuration")
+		}
+		if src.consumed {
+			t.Fatal("source was consumed before validating the unpack configuration")
+		}
+	})
 }

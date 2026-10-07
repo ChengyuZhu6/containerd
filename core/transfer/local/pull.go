@@ -37,6 +37,22 @@ import (
 )
 
 func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetcher, is transfer.ImageStorer, tops *transfer.Config) error {
+	// First find suitable platforms to unpack into
+	// If image storer is also an unpacker type, i.e implemented UnpackPlatforms() func
+	var unpacks []unpack.Platform
+	if iu, ok := is.(transfer.ImageUnpacker); ok {
+		for _, u := range iu.UnpackPlatforms() {
+			matched, mu := getSupportedPlatform(ctx, u, ts.config.UnpackPlatforms)
+			if !matched {
+				// Return an error instead of silently skipping the unpack,
+				// otherwise the caller gets an image which is not unpacked.
+				return fmt.Errorf("unpack configuration not supported (platform=%q, snapshotter=%q): %w",
+					platforms.FormatAll(u.Platform), u.Snapshotter, errdefs.ErrInvalidArgument)
+			}
+			unpacks = append(unpacks, mu)
+		}
+	}
+
 	ctx, done, err := ts.withLease(ctx)
 	if err != nil {
 		return err
@@ -187,50 +203,36 @@ func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetch
 		appendDistSrcLabelHandler,
 	)...)
 
-	// First find suitable platforms to unpack into
-	// If image storer is also an unpacker type, i.e implemented UnpackPlatforms() func
-	if iu, ok := is.(transfer.ImageUnpacker); ok {
-		unpacks := iu.UnpackPlatforms()
-		if len(unpacks) > 0 {
-			uopts := []unpack.UnpackerOpt{}
-			enableRemoteSnapshotAnnotations := false
-			// Only unpack if requested unpackconfig matches default/supported unpackconfigs
-			for _, u := range unpacks {
-				matched, mu := getSupportedPlatform(ctx, u, ts.config.UnpackPlatforms)
-				if matched {
-					if v, ok := mu.SnapshotterExports["enable_remote_snapshot_annotations"]; ok && v == "true" {
-						enableRemoteSnapshotAnnotations = true
-					}
-					if progressTracker != nil {
-						mu.ApplyOpts = append(mu.ApplyOpts, diff.WithProgress(progressTracker.ExtractProgress))
-					}
-					uopts = append(uopts, unpack.WithUnpackPlatform(mu))
-				} else {
-					log.G(ctx).WithFields(log.Fields{
-						"platform":    platforms.FormatAll(u.Platform),
-						"snapshotter": u.Snapshotter,
-					}).Warn("Unpack configuration not supported, skipping")
-				}
+	if len(unpacks) > 0 {
+		uopts := []unpack.UnpackerOpt{}
+		enableRemoteSnapshotAnnotations := false
+		for _, mu := range unpacks {
+			if v, ok := mu.SnapshotterExports["enable_remote_snapshot_annotations"]; ok && v == "true" {
+				enableRemoteSnapshotAnnotations = true
 			}
-
-			if ts.config.DuplicationSuppressor != nil {
-				uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
+			if progressTracker != nil {
+				mu.ApplyOpts = append(mu.ApplyOpts, diff.WithProgress(progressTracker.ExtractProgress))
 			}
-
-			if ts.limiterP != nil {
-				uopts = append(uopts, unpack.WithUnpackLimiter(ts.limiterP))
-			}
-
-			if enableRemoteSnapshotAnnotations {
-				handler = snpkg.AppendInfoHandlerWrapper(name)(handler)
-			}
-
-			unpacker, err = unpack.NewUnpacker(ctx, ts.content, uopts...)
-			if err != nil {
-				return fmt.Errorf("unable to initialize unpacker: %w", err)
-			}
-			handler = unpacker.Unpack(handler)
+			uopts = append(uopts, unpack.WithUnpackPlatform(mu))
 		}
+
+		if ts.config.DuplicationSuppressor != nil {
+			uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
+		}
+
+		if ts.limiterP != nil {
+			uopts = append(uopts, unpack.WithUnpackLimiter(ts.limiterP))
+		}
+
+		if enableRemoteSnapshotAnnotations {
+			handler = snpkg.AppendInfoHandlerWrapper(name)(handler)
+		}
+
+		unpacker, err = unpack.NewUnpacker(ctx, ts.content, uopts...)
+		if err != nil {
+			return fmt.Errorf("unable to initialize unpacker: %w", err)
+		}
+		handler = unpacker.Unpack(handler)
 	}
 
 	if err := images.Dispatch(ctx, handler, nil, desc); err != nil {
