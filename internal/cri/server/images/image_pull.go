@@ -219,7 +219,10 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		// No need to use `updateImage`, because the image reference must
 		// have been managed by the cri plugin.
 		// TODO: Use image service directly
-		if err := c.imageStore.Update(ctx, r, runtime.Name, platforms.Only(runtime.Platform)); err != nil {
+		// TODO: Use the runtime handler and platform resolved for the request. The
+		// read paths still use the default handler and platform, so writing another
+		// one here would leave a second variant behind after the image is removed.
+		if err := c.imageStore.Update(ctx, r, "", platforms.Default()); err != nil {
 			return "", fmt.Errorf("failed to update image store %q: %w", r, err)
 		}
 	}
