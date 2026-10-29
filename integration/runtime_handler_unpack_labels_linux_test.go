@@ -196,6 +196,9 @@ func TestRuntimeHandlerImageLifecycle(t *testing.T) {
 				config, err := legacy.Config(ctx)
 				require.NoError(t, err)
 				id := config.Digest.String()
+				diffIDs, err := legacy.RootFS(ctx)
+				require.NoError(t, err)
+				chainID := identity.ChainID(diffIDs).String()
 				require.NoError(t, Eventually(func() (bool, error) {
 					image, err := iSvc.ImageStatus(&criruntime.ImageSpec{Image: ref})
 					return image != nil && image.Spec.GetRuntimeHandler() == "runc", err
@@ -311,6 +314,12 @@ func TestRuntimeHandlerImageLifecycle(t *testing.T) {
 					_, err := client.ContentStore().Info(ctx, config.Digest)
 					return errdefs.IsNotFound(err), nil
 				}, 100*time.Millisecond, 10*time.Second))
+				for _, sn := range []string{"overlayfs", snapshotter} {
+					require.NoError(t, Eventually(func() (bool, error) {
+						_, err := client.SnapshotService(sn).Stat(ctx, chainID)
+						return errdefs.IsNotFound(err), nil
+					}, 100*time.Millisecond, 10*time.Second))
+				}
 			})
 		}
 	}

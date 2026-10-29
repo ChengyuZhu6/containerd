@@ -22,6 +22,33 @@ converted to the config version 3.
 For the further information, see [`../PLUGINS.md`](../PLUGINS.md).
 
 ## Basic configuration
+
+### Images and runtime handlers
+
+CRI image operations use `ImageSpec.runtime_handler` to identify an image variant.
+An empty handler selects `default_runtime_name`; an explicit handler must be configured.
+Pulling an image for one handler does not make it visible to another non-default handler,
+even when the image config digest and snapshotter are the same.
+
+Default-handler images retain ordinary containerd image references. Existing images and
+images imported outside CRI are available through the default handler. Non-default
+handlers must establish their own association with an explicit CRI image pull.
+Their metadata references are encoded internally; CRI returns the original repo tags
+and digests, together with `Image.Spec.RuntimeHandler`.
+
+`RemoveImage` removes all references for the selected image and handler only. An empty
+handler is not a request to remove all variants. Content and snapshots still referenced
+by another image variant, container or lease remain subject to the existing GC rules.
+The associations are restored after a containerd restart. Recovered legacy containers
+without an image handler are reported as using the default-handler image association.
+
+Kubernetes clients must pass the appropriate image handler for non-default workloads,
+including image status and removal. Older kubelets, or kubelets with
+`RuntimeClassInImageCriApi` disabled, do not provide this lifecycle contract: non-default
+images must be explicitly registered before use, and empty-handler image GC cannot
+remove non-default variants. Enabling this containerd behavior does not by itself enable
+the Kubernetes feature gate or complete kubelet GC integration.
+
 ### Cgroup Driver
 While containerd and Kubernetes use the legacy `cgroupfs` driver for managing cgroups by default,
 it is recommended to use the `systemd` driver on systemd-based hosts for compliance of
