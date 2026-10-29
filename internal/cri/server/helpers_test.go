@@ -73,7 +73,11 @@ func TestToContainerdImage(t *testing.T) {
 		})
 		manifests = append(manifests, imagetest.AddPlatform(cs.Manifest(config), platform))
 	}
-	index := cs.Index(manifests...)
+	index := cs.Index(append([]imagetest.Content{{Descriptor: imagespec.Descriptor{
+		MediaType: imagespec.MediaTypeImageIndex,
+		Digest:    digest.FromString("missing-index"),
+		Platform:  &imagespec.Platform{OS: "windows", Architecture: "amd64"},
+	}}}, manifests...)...)
 	img, err := imageService.Create(ctx, images.Image{Name: "test", Target: index.Descriptor})
 	require.NoError(t, err)
 	store := imagestore.NewStore(imageService, cs.Store, platforms.Default())
@@ -84,7 +88,7 @@ func TestToContainerdImage(t *testing.T) {
 	require.NoError(t, err)
 
 	c := &criService{client: client}
-	converted, err := c.toContainerdImage(ctx, selected)
+	converted, imageDigest, err := c.toContainerdImage(ctx, selected)
 	require.NoError(t, err)
 	config, err := converted.Config(ctx)
 	require.NoError(t, err)
@@ -96,9 +100,10 @@ func TestToContainerdImage(t *testing.T) {
 	stored, err := imageService.Get(ctx, img.Name)
 	require.NoError(t, err)
 	assert.Equal(t, index.Descriptor, stored.Target)
+	assert.Equal(t, index.Descriptor.Digest.String(), imageDigest)
 
 	selected.ID = digest.FromString("stale").String()
-	_, err = c.toContainerdImage(ctx, selected)
+	_, _, err = c.toContainerdImage(ctx, selected)
 	require.Error(t, err)
 }
 

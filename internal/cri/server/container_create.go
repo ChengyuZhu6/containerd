@@ -132,10 +132,11 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve image %q: %w", config.GetImage().GetImage(), err)
 	}
-	containerdImage, err := c.toContainerdImage(ctx, image)
+	containerdImage, imageDigest, err := c.toContainerdImage(ctx, image)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
 	}
+	meta.ImageDigest = imageDigest
 
 	span.SetAttributes(
 		tracing.Attribute("container.image.ref", containerdImage.Name()),
@@ -327,7 +328,6 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 		opts = append(opts, customopts.WithVolumes(mountMap, platform))
 	}
 	r.meta.ImageRef = r.imageID
-	r.meta.ImageDigest = (*r.containerdImage).Target().Digest.String()
 	r.meta.ImageName = (*r.containerdImage).Name()
 	if signal := r.containerConfig.GetStopSignal(); signal != runtime.Signal_SIGNAL_RUNTIME_DEFAULT {
 		stopSignal, err := criSignalToOCIStopSignal(signal)
