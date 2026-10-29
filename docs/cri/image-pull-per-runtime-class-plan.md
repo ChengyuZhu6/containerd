@@ -87,9 +87,65 @@ The complete conformance failures concern host-port legacy iptables/NAT support 
 
 Node-test namespace and newly created scoped references were removed. Original containerd, shim and ctr binaries were restored byte-for-byte; configuration was unchanged and the node remained Ready. Backup files, test programs and logs are local ignored artifacts, not submitted source.
 
+## Official Kubernetes v1.37.2 feature-gate validation
+
+Following the earlier v1.29.1 compatibility run, the official `v1.37.2` kubelet,
+kube-apiserver and kubectl were downloaded from `dl.k8s.io` and checked against their
+published SHA256 files. An independently downloaded and checksum-verified etcd
+`v3.6.5` supported a process-level isolated test cluster on the same node.
+
+Production services were not replaced. The test API and kubelet ports listened on
+loopback, with separate certificates, kubeconfigs, runtime root/state/socket, kubelet
+root/log paths and `/pr2-feature-test` Pod cgroups. There was no scheduler or controller
+manager; Pods were explicitly assigned to the test node and used host networking.
+This is a targeted kubelet/CRI end-to-end test, not the Kubernetes official e2e suite.
+
+The running kubelet's `configz` confirmed `RuntimeClassInImageCriApi: true` and
+`imageMaximumGCAge: 1m`. Two RuntimeClass Pods, A and B, used the same host-architecture
+busybox image and native snapshotter. Images were not pre-registered: the official
+kubelet automatically queried and pulled each handler, and both Pods reached Ready.
+
+A was deleted through the test Kubernetes API. After its container had been cleaned
+up, the test waited for the unmodified five-minute kubelet image-GC cycle. A test-only
+transparent CRI proxy forwarded raw protobuf payloads without rewriting them, recording
+requests for evidence. The observer only queried image/container state; it did not call
+`RemoveImage` or otherwise substitute for automatic GC.
+
+| Check | Actual result |
+| --- | --- |
+| Automatic image status and pulls carry A/B handlers | Passed |
+| A/B images share the config ID and both workloads run | Passed |
+| Running B reports the corresponding image handler | Passed |
+| GC identifies unused A after its container is gone | Passed: kubelet log records `runtimeHandler="a"` |
+| Actual GC deletion request carries A handler | Failed: CRI `RemoveImage` has an empty handler |
+| A image disappears after automatic GC | Failed: A remains queryable |
+| B image, Pod identity and restart count are preserved | Passed |
+| A new B Pod with `imagePullPolicy: Never` runs without repulling | Passed; total image pull requests remained two |
+
+At `2026-10-29T14:54:44Z`, kubelet logged collection of A but sent a deletion request
+without the handler. Kubelet then logged GC success even though A remained. Under the
+confirmed containerd contract, an empty handler selects the default association; there
+was no corresponding default image, so deletion was idempotently successful without
+removing A. This is an observed integration failure, not a passing end-to-end GC result.
+
+The exact release source explains the lost context: [GC manager](https://github.com/kubernetes/kubernetes/blob/v1.37.2/pkg/kubelet/images/image_gc_manager.go#L524-L530)
+passes `RuntimeHandler`, but [the runtime adapter](https://github.com/kubernetes/kubernetes/blob/v1.37.2/pkg/kubelet/kuberuntime/kuberuntime_image.go#L137-L140)
+constructs the CRI request using only `Image`. The downloaded kubelet was not modified
+or rebuilt to mask this failure. This finding applies to the tested exact release; it
+is not a claim that every Kubernetes release has the same behavior.
+
+Local evidence: `_output/pr2/k8s-feature/feature-gc-result.json`, `cri-requests.jsonl`,
+`kubelet.log`, `kubelet-configz.json`, `pods-running.json`, `pods-after-gc.json`,
+`observed-before-gc.json`, `observed-after-gc.json`, exact-tag source and
+`binaries.sha256`. The automatic-GC test exit code is 1. Downloads, certificates and
+scripts are ignored local artifacts, not submitted source.
+
+Test Pods, processes and empty test cgroups were cleaned up. The original production
+node remained Ready, with its original services and configuration unchanged.
+
 ## Next steps
 
 1. Review the compatibility contract and the complete feature diff; keep PR-1 separate.
 2. Resolve full-suite environment blockers and record all skips and failures, including any unclassified integration failures.
-3. Validate a supported kubelet version's pull/status/list/container tuples and removal with the feature enabled.
+3. Track a Kubernetes-side fix or a verified release that preserves the handler through the final CRI deletion call, then rerun the same automatic-GC test. Do not weaken containerd isolation or silently patch the downloaded kubelet to claim a release passes.
 4. Obtain independent maintainer review before opening a PR. All implementation and review communication require human review.
