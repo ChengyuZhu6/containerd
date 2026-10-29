@@ -19,6 +19,7 @@ package server
 import (
 	"context"
 	"os"
+	"path/filepath"
 	goruntime "runtime"
 	"testing"
 	"time"
@@ -26,19 +27,77 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/images/imagetest"
+	"github.com/containerd/containerd/v2/core/metadata"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/pkg/protobuf/types"
 	"github.com/containerd/containerd/v2/plugins"
+	"github.com/containerd/platforms"
 	"github.com/containerd/typeurl/v2"
+	"github.com/opencontainers/go-digest"
+	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
+	bolt "go.etcd.io/bbolt"
 
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestToContainerdImage(t *testing.T) {
+	ctx := namespaces.WithNamespace(context.Background(), "test")
+	cs := imagetest.NewContentStore(ctx, t)
+	db, err := bolt.Open(filepath.Join(t.TempDir(), "metadata.db"), 0o600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	imageService := metadata.NewImageStore(metadata.NewDB(db, cs.Store, nil))
+	client, err := containerd.New("", containerd.WithServices(
+		containerd.WithImageStore(imageService), containerd.WithContentStore(cs.Store),
+	), containerd.WithDefaultPlatform(platforms.OnlyStrict(imagespec.Platform{OS: "linux", Architecture: "amd64"})))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, client.Close()) })
+
+	var manifests []imagetest.Content
+	for _, arch := range []string{"amd64", "arm64"} {
+		platform := imagespec.Platform{OS: "linux", Architecture: arch}
+		config := cs.JSONObject(imagespec.MediaTypeImageConfig, imagespec.Image{
+			Platform: platform,
+			RootFS:   imagespec.RootFS{Type: "layers", DiffIDs: []digest.Digest{digest.FromString(arch)}},
+		})
+		manifests = append(manifests, imagetest.AddPlatform(cs.Manifest(config), platform))
+	}
+	index := cs.Index(manifests...)
+	img, err := imageService.Create(ctx, images.Image{Name: "test", Target: index.Descriptor})
+	require.NoError(t, err)
+	store := imagestore.NewStore(imageService, cs.Store, platforms.Default())
+	require.NoError(t, store.UpdateWithPlatform(ctx, img.Name, platforms.OnlyStrict(imagespec.Platform{OS: "linux", Architecture: "arm64"})))
+	id, err := store.Resolve(img.Name)
+	require.NoError(t, err)
+	selected, err := store.Get(id)
+	require.NoError(t, err)
+
+	c := &criService{client: client}
+	converted, err := c.toContainerdImage(ctx, selected)
+	require.NoError(t, err)
+	config, err := converted.Config(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, selected.ID, config.Digest.String())
+	diffIDs, err := converted.RootFS(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, selected.ImageSpec.RootFS.DiffIDs, diffIDs)
+	assert.Equal(t, index.Descriptor, converted.Target())
+
+	selected.ID = digest.FromString("stale").String()
+	_, err = c.toContainerdImage(ctx, selected)
+	require.Error(t, err)
+}
 
 // TestGetUserFromImage tests the logic of getting image uid or user name of image user.
 func TestGetUserFromImage(t *testing.T) {
