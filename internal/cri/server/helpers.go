@@ -169,14 +169,14 @@ func criContainerStateToString(state runtime.ContainerState) string {
 }
 
 // toContainerdImage converts an image object in image store to containerd image handler.
-func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, error) {
+func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, string, error) {
 	// image should always have at least one reference.
 	if len(image.References) == 0 {
-		return nil, fmt.Errorf("invalid image with no reference %q", image.ID)
+		return nil, "", fmt.Errorf("invalid image with no reference %q", image.ID)
 	}
 	i, err := c.client.ImageService().Get(ctx, image.References[0])
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var manifest ocispec.Descriptor
 	err = images.Walk(ctx, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
@@ -196,16 +196,21 @@ func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Ima
 			}
 			return nil, nil
 		}
-		return images.Children(ctx, c.client.ContentStore(), desc)
+		children, err := images.Children(ctx, c.client.ContentStore(), desc)
+		if errdefs.IsNotFound(err) && desc.Digest != i.Target.Digest {
+			return nil, nil
+		}
+		return children, err
 	}), i.Target)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if manifest.MediaType == "" {
-		return nil, fmt.Errorf("image %q has no manifest for config %q: %w", i.Name, image.ID, errdefs.ErrNotFound)
+		return nil, "", fmt.Errorf("image %q has no manifest for config %q: %w", i.Name, image.ID, errdefs.ErrNotFound)
 	}
+	digest := i.Target.Digest.String()
 	i.Target = manifest
-	return containerd.NewImageWithPlatform(c.client, i, platforms.All), nil
+	return containerd.NewImageWithPlatform(c.client, i, platforms.All), digest, nil
 }
 
 // getUserFromImage gets uid or user name of the image user.
