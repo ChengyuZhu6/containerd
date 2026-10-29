@@ -92,7 +92,10 @@ func TestToContainerdImage(t *testing.T) {
 	diffIDs, err := converted.RootFS(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, selected.ImageSpec.RootFS.DiffIDs, diffIDs)
-	assert.Equal(t, index.Descriptor, converted.Target())
+	assert.Equal(t, manifests[1].Descriptor, converted.Target())
+	stored, err := imageService.Get(ctx, img.Name)
+	require.NoError(t, err)
+	assert.Equal(t, index.Descriptor, stored.Target)
 
 	selected.ID = digest.FromString("stale").String()
 	_, err = c.toContainerdImage(ctx, selected)

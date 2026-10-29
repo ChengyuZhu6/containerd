@@ -28,11 +28,13 @@ import (
 	"time"
 
 	"github.com/containerd/typeurl/v2"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/images"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
@@ -176,15 +178,34 @@ func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Ima
 	if err != nil {
 		return nil, err
 	}
-	containerdImage := containerd.NewImageWithPlatform(c.client, i, platforms.OnlyStrict(image.ImageSpec.Platform))
-	config, err := containerdImage.Config(ctx)
+	var manifest ocispec.Descriptor
+	err = images.Walk(ctx, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		if manifest.MediaType != "" {
+			return nil, nil
+		}
+		if images.IsManifestType(desc.MediaType) {
+			config, err := images.Config(ctx, c.client.ContentStore(), desc, nil)
+			if err != nil {
+				if errdefs.IsNotFound(err) {
+					return nil, nil
+				}
+				return nil, err
+			}
+			if config.Digest.String() == image.ID {
+				manifest = desc
+			}
+			return nil, nil
+		}
+		return images.Children(ctx, c.client.ContentStore(), desc)
+	}), i.Target)
 	if err != nil {
 		return nil, err
 	}
-	if config.Digest.String() != image.ID {
-		return nil, fmt.Errorf("image %q config %q does not match resolved image %q", i.Name, config.Digest, image.ID)
+	if manifest.MediaType == "" {
+		return nil, fmt.Errorf("image %q has no manifest for config %q: %w", i.Name, image.ID, errdefs.ErrNotFound)
 	}
-	return containerdImage, nil
+	i.Target = manifest
+	return containerd.NewImageWithPlatform(c.client, i, platforms.All), nil
 }
 
 // getUserFromImage gets uid or user name of the image user.

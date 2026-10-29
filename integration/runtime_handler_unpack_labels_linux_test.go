@@ -17,7 +17,10 @@
 package integration
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,13 +29,19 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
+	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	criruntime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	coreimages "github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/integration/images"
+	"github.com/containerd/containerd/v2/internal/cri/labels"
 	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/containerd/v2/plugins"
 )
@@ -141,4 +150,125 @@ version = 3
 	cn2Status, err := rSvc.ContainerStatus(cn2ID)
 	require.NoError(t, err)
 	assert.Equal(t, criruntime.ContainerState_CONTAINER_CREATED, cn2Status.State)
+}
+
+func TestImagePlatformConsumption(t *testing.T) {
+	workDir := t.TempDir()
+	pauseRef := images.Get(images.Pause)
+	cfg := fmt.Sprintf(`version = 3
+[plugins.'io.containerd.cri.v1.images']
+  snapshotter = "native"
+[plugins.'io.containerd.cri.v1.images'.pinned_images]
+  sandbox = %q
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+  snapshotter = "native"
+`, pauseRef)
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "config.toml"), []byte(cfg), 0o600))
+	ctrd := newCtrdProc(t, *containerdBin, workDir, nil)
+	t.Cleanup(func() {
+		assert.NoError(t, ctrd.kill(syscall.SIGTERM))
+		assert.NoError(t, ctrd.wait(time.Minute))
+		if t.Failed() {
+			dumpFileContent(t, ctrd.logPath())
+		}
+	})
+	require.NoError(t, ctrd.isReady())
+	rSvc := ctrd.criRuntimeService(t)
+	iSvc := ctrd.criImageService(t)
+	client, err := containerd.New(ctrd.grpcAddress(), containerd.WithDefaultNamespace(k8sNamespace))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, client.Close()) })
+	t.Cleanup(func() { cleanupPods(t, rSvc) })
+	ctx, done, err := client.WithLease(context.Background())
+	require.NoError(t, err)
+	defer done(ctx)
+	cs := client.ContentStore()
+	writeJSON := func(mediaType string, value any) imagespec.Descriptor {
+		data, err := json.Marshal(value)
+		require.NoError(t, err)
+		desc := imagespec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(data), Size: int64(len(data))}
+		require.NoError(t, content.WriteBlob(ctx, cs, desc.Digest.String(), bytes.NewReader(data), desc))
+		return desc
+	}
+	selectedPlatform := platforms.DefaultSpec()
+	selectedPlatform.Architecture = "arm64"
+	if platforms.DefaultSpec().Architecture == "arm64" {
+		selectedPlatform.Architecture = "amd64"
+	}
+	selectedPlatform.Variant = ""
+
+	for _, source := range []string{images.Get(images.BusyBox), pauseRef} {
+		t.Run(source, func(t *testing.T) {
+			base, err := client.Pull(ctx, source)
+			require.NoError(t, err)
+			manifest, err := coreimages.Manifest(ctx, cs, base.Target(), platforms.Default())
+			require.NoError(t, err)
+			baseSpec, err := base.Spec(ctx)
+			require.NoError(t, err)
+			var index imagespec.Index
+			var selectedID digest.Digest
+			var selectedChain string
+			for _, platform := range []imagespec.Platform{platforms.DefaultSpec(), selectedPlatform} {
+				var layer bytes.Buffer
+				tw := tar.NewWriter(&layer)
+				marker := platforms.Format(platform)
+				require.NoError(t, tw.WriteHeader(&tar.Header{Name: "pr1-platform", Mode: 0o644, Size: int64(len(marker))}))
+				_, err := tw.Write([]byte(marker))
+				require.NoError(t, err)
+				require.NoError(t, tw.Close())
+				layerDesc := imagespec.Descriptor{MediaType: imagespec.MediaTypeImageLayer, Digest: digest.FromBytes(layer.Bytes()), Size: int64(layer.Len())}
+				require.NoError(t, content.WriteBlob(ctx, cs, layerDesc.Digest.String(), bytes.NewReader(layer.Bytes()), layerDesc))
+				spec := baseSpec
+				spec.Platform = platform
+				spec.RootFS.DiffIDs = append(append([]digest.Digest{}, baseSpec.RootFS.DiffIDs...), layerDesc.Digest)
+				m := manifest
+				m.Config = writeJSON(imagespec.MediaTypeImageConfig, spec)
+				m.Layers = append(append([]imagespec.Descriptor{}, manifest.Layers...), layerDesc)
+				desc := writeJSON(imagespec.MediaTypeImageManifest, m)
+				desc.Platform = &platform
+				index.Manifests = append(index.Manifests, desc)
+				if platform.Architecture == selectedPlatform.Architecture {
+					selectedID = m.Config.Digest
+					selectedChain = identity.ChainID(spec.RootFS.DiffIDs).String()
+				}
+			}
+			index.MediaType = imagespec.MediaTypeImageIndex
+			index.SchemaVersion = 2
+			img := coreimages.Image{Name: source, Target: writeJSON(imagespec.MediaTypeImageIndex, index), Labels: map[string]string{labels.ImagePlatformLabelKey: platforms.Format(selectedPlatform)}}
+			_, err = client.ImageService().Update(ctx, img, "target", "labels."+labels.ImagePlatformLabelKey)
+			require.NoError(t, err)
+			require.NoError(t, Eventually(func() (bool, error) {
+				image, err := iSvc.ImageStatus(&criruntime.ImageSpec{Image: source})
+				return image != nil && image.Id == selectedID.String(), err
+			}, 100*time.Millisecond, 10*time.Second))
+			_, err = client.SnapshotService("native").Stat(ctx, selectedChain)
+			require.True(t, errdefs.IsNotFound(err), "selected image must exercise unpack fallback")
+			sbConfig := PodSandboxConfig("platform", "image-platform", WithHostNetwork)
+			sb, err := rSvc.RunPodSandbox(sbConfig, "")
+			require.NoError(t, err)
+			if source == pauseRef {
+				container, err := client.LoadContainer(ctx, sb)
+				require.NoError(t, err)
+				info, err := container.Info(ctx)
+				require.NoError(t, err)
+				snapshot, err := client.SnapshotService("native").Stat(ctx, info.SnapshotKey)
+				require.NoError(t, err)
+				assert.Equal(t, selectedChain, snapshot.Parent)
+			} else {
+				config := ContainerConfig("platform", source, WithCommand("sleep", "300"))
+				cn, err := rSvc.CreateContainer(sb, config, sbConfig)
+				require.NoError(t, err)
+				require.NoError(t, rSvc.StartContainer(cn))
+				stdout, stderr, err := rSvc.ExecSync(cn, []string{"cat", "/pr1-platform"}, time.Minute)
+				require.NoError(t, err, string(stderr))
+				assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
+				status, err := rSvc.ContainerStatus(cn)
+				require.NoError(t, err)
+				assert.Equal(t, selectedID.String(), status.ImageRef)
+			}
+			require.NoError(t, rSvc.StopPodSandbox(sb))
+			require.NoError(t, rSvc.RemovePodSandbox(sb))
+		})
+	}
 }

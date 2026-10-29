@@ -27,6 +27,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/containerd/nri"
 	v1 "github.com/containerd/nri/types/v1"
+	"github.com/containerd/platforms"
 	"github.com/containerd/typeurl/v2"
 	"github.com/opencontainers/selinux/go-selinux"
 
@@ -82,9 +83,17 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if err != nil {
 		return cin, fmt.Errorf("failed to parse image reference %q: %w", sandboxImage, err)
 	}
-	pauseImage, err := c.client.GetImage(ctx, normalized.String())
+	image, err := c.client.ImageService().Get(ctx, normalized.String())
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox image %q: %w", normalized.String(), err)
+	}
+	pauseImage := containerd.NewImage(c.client, image)
+	if value := image.Labels[crilabels.ImagePlatformLabelKey]; value != "" {
+		platform, err := platforms.Parse(value)
+		if err != nil {
+			return cin, fmt.Errorf("failed to get sandbox image platform %q: %w", value, err)
+		}
+		pauseImage = containerd.NewImageWithPlatform(c.client, image, platforms.Only(platform))
 	}
 
 	// Get the image spec from containerd image
