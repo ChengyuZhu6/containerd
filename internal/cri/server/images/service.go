@@ -95,12 +95,14 @@ type CRIImageService struct {
 	// one in-flight fetch request or unpack handler for a given descriptor's
 	// or chain ID.
 	unpackDuplicationSuppressor kmutex.KeyedLocker
+	imageMutationLocker         kmutex.KeyedLocker
 
 	// downloadLimiter is used to limit the number of concurrent downloads.
 	downloadLimiter *semaphore.Weighted
 }
 
 type resolvedRuntimeHandler struct {
+	Name        string
 	Platform    *imagespec.Platform
 	Snapshotter string
 }
@@ -150,6 +152,7 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 		snapshotStore:               snapshotstore.NewStore(),
 		transferrer:                 options.Transferrer,
 		unpackDuplicationSuppressor: kmutex.New(),
+		imageMutationLocker:         kmutex.New(),
 		downloadLimiter:             downloadLimiter,
 	}
 
@@ -201,6 +204,7 @@ func (c *CRIImageService) resolveRuntimeHandler(handler string) (resolvedRuntime
 		name = c.defaultRuntimeName
 	}
 	h := resolvedRuntimeHandler{
+		Name:        name,
 		Snapshotter: c.config.Snapshotter,
 	}
 	if p, ok := c.runtimePlatforms[name]; ok && p != nil {
@@ -214,32 +218,24 @@ func (c *CRIImageService) resolveRuntimeHandler(handler string) (resolvedRuntime
 
 // LocalResolve resolves image reference locally and returns corresponding image metadata. It
 // returns errdefs.ErrNotFound if the reference doesn't exist.
-func (c *CRIImageService) LocalResolve(refOrID string) (imagestore.Image, error) {
-	getImageID := func(refOrId string) string {
-		if _, err := imagedigest.Parse(refOrID); err == nil {
-			return refOrID
+func (c *CRIImageService) LocalResolve(refOrID, runtimeHandler string) (imagestore.Image, error) {
+	h, err := c.resolveRuntimeHandler(runtimeHandler)
+	if err != nil {
+		return imagestore.Image{}, err
+	}
+	id := refOrID
+	if _, err := imagedigest.Parse(refOrID); err != nil {
+		if normalized, err := docker.ParseDockerRef(refOrID); err == nil {
+			id, err = c.imageStore.ResolveForRuntime(normalized.String(), h.Name)
+			if err != nil && errdefs.IsNotFound(err) && h.Name == c.defaultRuntimeName {
+				id, err = c.imageStore.Resolve(normalized.String())
+			}
+			if err != nil {
+				id = refOrID
+			}
 		}
-		return func(ref string) string {
-			// ref is not image id, try to resolve it locally.
-			// TODO(random-liu): Handle this error better for debugging.
-			normalized, err := docker.ParseDockerRef(ref)
-			if err != nil {
-				return ""
-			}
-			id, err := c.imageStore.Resolve(normalized.String())
-			if err != nil {
-				return ""
-			}
-			return id
-		}(refOrID)
 	}
-
-	imageID := getImageID(refOrID)
-	if imageID == "" {
-		// Try to treat ref as imageID
-		imageID = refOrID
-	}
-	return c.imageStore.Get(imageID)
+	return c.GetImage(id, h.Name)
 }
 
 // RuntimeSnapshotter overrides the default snapshotter if Snapshotter is set for this runtime.
@@ -255,8 +251,30 @@ func (c *CRIImageService) RuntimeSnapshotter(ctx context.Context, ociRuntime cri
 }
 
 // GetImage gets image metadata by image id.
-func (c *CRIImageService) GetImage(id string) (imagestore.Image, error) {
-	return c.imageStore.Get(id)
+func (c *CRIImageService) GetImage(id, runtimeHandler string) (imagestore.Image, error) {
+	if runtimeHandler == "" {
+		runtimeHandler = c.defaultRuntimeName
+	}
+	image, err := c.imageStore.GetForRuntime(id, runtimeHandler)
+	if runtimeHandler == "" || runtimeHandler != c.defaultRuntimeName || (err != nil && !errdefs.IsNotFound(err)) {
+		return image, err
+	}
+	legacyID := id
+	if err == nil {
+		legacyID = image.ID
+	}
+	legacy, legacyErr := c.imageStore.Get(legacyID)
+	if err != nil {
+		if legacyErr != nil {
+			return image, err
+		}
+		image = legacy
+	} else if legacyErr == nil {
+		image.References = append(append([]string{}, image.References...), legacy.References...)
+		image.Pinned = image.Pinned || legacy.Pinned
+	}
+	image.RuntimeHandler = runtimeHandler
+	return image, nil
 }
 
 // GetSnapshot returns the snapshot with specified key.

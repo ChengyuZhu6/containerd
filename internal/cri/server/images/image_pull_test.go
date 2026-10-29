@@ -39,6 +39,7 @@ import (
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/labels"
+	"github.com/containerd/containerd/v2/internal/kmutex"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -580,10 +581,11 @@ func TestRuntimeHandlerPullBackends(t *testing.T) {
 			},
 		}
 		c := &CRIImageService{
-			client:           client,
-			transferrer:      transferrer,
-			runtimePlatforms: map[string]*ImagePlatform{"native": {Snapshotter: "native", Platform: &platform}},
-			config:           criconfig.ImageConfig{ImagePullProgressTimeout: "1m", DisableSnapshotAnnotations: true},
+			client:              client,
+			transferrer:         transferrer,
+			imageMutationLocker: kmutex.New(),
+			runtimePlatforms:    map[string]*ImagePlatform{"native": {Snapshotter: "native", Platform: &platform}},
+			config:              criconfig.ImageConfig{ImagePullProgressTimeout: "1m", DisableSnapshotAnnotations: true},
 		}
 
 		_, err := c.PullImage(context.Background(), "example.com/test:latest", nil, nil, "native")
@@ -615,7 +617,7 @@ func TestPersistedImagePlatform(t *testing.T) {
 				return nil, errdefs.ErrUnavailable
 			},
 		}
-		c := &CRIImageService{client: client}
+		c := &CRIImageService{client: client, imageMutationLocker: kmutex.New()}
 		require.ErrorIs(t, c.UpdateImage(context.Background(), ref), errdefs.ErrUnavailable)
 	})
 

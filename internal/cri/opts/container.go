@@ -36,6 +36,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/unpack"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
 )
 
@@ -94,7 +95,11 @@ func unpackImage(ctx context.Context, client *containerd.Client, i containerd.Im
 
 	var h images.Handler = childrenHandler
 	if appendSnapshotLabels {
-		h = snpkg.AppendInfoHandlerWrapper(i.Name())(h)
+		ref, _, err := imagestore.ParseName(i.Name())
+		if err != nil {
+			return err
+		}
+		h = snpkg.AppendInfoHandlerWrapper(ref)(h)
 	}
 
 	if err := images.Dispatch(ctx, u.Unpack(h), nil, i.Target()); err != nil {

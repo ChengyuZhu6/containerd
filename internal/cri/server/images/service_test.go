@@ -23,6 +23,7 @@ import (
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	snapshotstore "github.com/containerd/containerd/v2/internal/cri/store/snapshot"
+	"github.com/containerd/containerd/v2/internal/kmutex"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/stretchr/testify/assert"
@@ -39,11 +40,12 @@ const (
 // newTestCRIService creates a fake criService for test.
 func newTestCRIService() (*CRIImageService, *GRPCCRIImageService) {
 	service := &CRIImageService{
-		config:           testImageConfig,
-		runtimePlatforms: map[string]*ImagePlatform{},
-		imageFSPaths:     map[string]string{"overlayfs": testImageFSPath},
-		imageStore:       imagestore.NewStore(nil, nil, platforms.Default()),
-		snapshotStore:    snapshotstore.NewStore(),
+		config:              testImageConfig,
+		runtimePlatforms:    map[string]*ImagePlatform{},
+		imageFSPaths:        map[string]string{"overlayfs": testImageFSPath},
+		imageStore:          imagestore.NewStore(nil, nil, platforms.Default()),
+		snapshotStore:       snapshotstore.NewStore(),
+		imageMutationLocker: kmutex.New(),
 	}
 
 	return service, &GRPCCRIImageService{service}
@@ -96,11 +98,11 @@ func TestLocalResolve(t *testing.T) {
 		"docker.io/library/busybox:latest",
 		"docker.io/library/busybox@sha256:e6693c20186f837fc393390135d8a598a96a833917917789d63766cab6c59582",
 	} {
-		img, err := c.LocalResolve(ref)
+		img, err := c.LocalResolve(ref, "")
 		assert.NoError(t, err)
 		assert.Equal(t, image, img)
 	}
-	img, err := c.LocalResolve("randomid")
+	img, err := c.LocalResolve("randomid", "")
 	assert.Equal(t, errdefs.IsNotFound(err), true)
 	assert.Equal(t, imagestore.Image{}, img)
 }

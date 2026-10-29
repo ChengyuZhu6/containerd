@@ -28,11 +28,13 @@ import (
 	"time"
 
 	"github.com/containerd/typeurl/v2"
+	"github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
@@ -170,6 +172,15 @@ func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Ima
 	// image should always have at least one reference.
 	if len(image.References) == 0 {
 		return nil, fmt.Errorf("invalid image with no reference %q", image.ID)
+	}
+	for _, name := range image.References {
+		ref, _, err := imagestore.ParseName(name)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := digest.Parse(ref); err != nil {
+			return c.client.GetImage(ctx, name)
+		}
 	}
 	return c.client.GetImage(ctx, image.References[0])
 }
@@ -375,6 +386,19 @@ func (c *criService) generateAndSendContainerEvent(ctx context.Context, containe
 	}
 
 	c.containerEventsQ.Send(&event)
+}
+
+func (c *criService) effectiveSandboxRuntimeHandler(config *runtime.PodSandboxConfig, runtimeHandler string) (string, error) {
+	if _, err := c.config.GetSandboxRuntime(config, runtimeHandler); err != nil {
+		return "", err
+	}
+	if config.GetAnnotations()[annotations.UntrustedWorkload] == "true" {
+		return criconfig.RuntimeUntrusted, nil
+	}
+	if runtimeHandler == "" {
+		return c.config.DefaultRuntimeName, nil
+	}
+	return runtimeHandler, nil
 }
 
 func (c *criService) getPodSandboxRuntime(sandboxID string) (runtime criconfig.Runtime, err error) {

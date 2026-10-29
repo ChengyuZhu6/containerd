@@ -27,6 +27,7 @@ import (
 
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -39,6 +40,45 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestEffectiveSandboxRuntimeHandler(t *testing.T) {
+	c := newTestCRIService()
+	c.config.DefaultRuntimeName = "default"
+	c.config.Runtimes = map[string]criconfig.Runtime{
+		"default":                  {},
+		"alternate":                {},
+		criconfig.RuntimeUntrusted: {},
+	}
+	for _, test := range []struct {
+		name      string
+		handler   string
+		untrusted bool
+		expected  string
+		expectErr bool
+	}{
+		{name: "legacy default", expected: "default"},
+		{name: "explicit default", handler: "default", expected: "default"},
+		{name: "alternate", handler: "alternate", expected: "alternate"},
+		{name: "implicit untrusted", untrusted: true, expected: criconfig.RuntimeUntrusted},
+		{name: "explicit untrusted", handler: criconfig.RuntimeUntrusted, untrusted: true, expected: criconfig.RuntimeUntrusted},
+		{name: "untrusted rejects explicit default", handler: "default", untrusted: true, expectErr: true},
+		{name: "unknown", handler: "unknown", expectErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := &runtime.PodSandboxConfig{}
+			if test.untrusted {
+				config.Annotations = map[string]string{annotations.UntrustedWorkload: "true"}
+			}
+			handler, err := c.effectiveSandboxRuntimeHandler(config, test.handler)
+			if test.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.expected, handler)
+		})
+	}
+}
 
 // TestGetUserFromImage tests the logic of getting image uid or user name of image user.
 func TestGetUserFromImage(t *testing.T) {

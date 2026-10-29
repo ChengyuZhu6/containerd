@@ -18,8 +18,10 @@ package image
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -38,11 +40,45 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
+const namePrefix = "io.cri-containerd.image.v1/"
+
+// Name returns the containerd image name for a reference and runtime handler.
+// An empty handler preserves the legacy image name.
+func Name(ref, handler string) string {
+	if handler == "" {
+		return ref
+	}
+	return namePrefix + base64.RawURLEncoding.EncodeToString([]byte(handler)) + "/" + base64.RawURLEncoding.EncodeToString([]byte(ref))
+}
+
+// ParseName returns the reference and runtime handler encoded in an image name.
+// Names outside the reserved prefix belong to the legacy image store.
+func ParseName(name string) (ref, handler string, err error) {
+	if !strings.HasPrefix(name, namePrefix) && name != strings.TrimSuffix(namePrefix, "/") {
+		return name, "", nil
+	}
+	encodedHandler, encodedRef, ok := strings.Cut(strings.TrimPrefix(name, namePrefix), "/")
+	if !ok || encodedHandler == "" || encodedRef == "" {
+		return "", "", fmt.Errorf("invalid runtime image name %q: %w", name, errdefs.ErrInvalidArgument)
+	}
+	h, err := base64.RawURLEncoding.DecodeString(encodedHandler)
+	if err != nil || base64.RawURLEncoding.EncodeToString(h) != encodedHandler {
+		return "", "", fmt.Errorf("invalid runtime handler in image name %q: %w", name, errdefs.ErrInvalidArgument)
+	}
+	r, err := base64.RawURLEncoding.DecodeString(encodedRef)
+	if err != nil || base64.RawURLEncoding.EncodeToString(r) != encodedRef {
+		return "", "", fmt.Errorf("invalid reference in image name %q: %w", name, errdefs.ErrInvalidArgument)
+	}
+	return string(r), string(h), nil
+}
+
 // Image contains all resources associated with the image. All fields
 // MUST not be mutated directly after created.
 type Image struct {
 	// Id of the image. Normally the digest of image config.
 	ID string
+	// RuntimeHandler is the runtime handler owning the image.
+	RuntimeHandler string
 	// References are references to the image, e.g. RepoTag and RepoDigest.
 	References []string
 	// ChainID is the chainID of the image.
@@ -76,23 +112,43 @@ type Store struct {
 	// TODO: Make this store multi-platform
 	platform platforms.MatchComparer
 
-	// store is the internal image store indexed by image id.
+	// store is the legacy internal image store indexed by image id.
 	store *store
+	// runtimeStores partitions image IDs and pinned references by runtime handler.
+	runtimeStores map[string]*store
 }
 
 // NewStore creates an image store.
 func NewStore(img Getter, provider content.InfoReaderProvider, platform platforms.MatchComparer) *Store {
 	return &Store{
-		refCache: make(map[string]string),
-		images:   img,
-		provider: provider,
-		platform: platform,
-		store: &store{
-			images:     make(map[string]Image),
-			digestSet:  digestset.NewSet(),
-			pinnedRefs: make(map[string]sets.Set[string]),
-		},
+		refCache:      make(map[string]string),
+		images:        img,
+		provider:      provider,
+		platform:      platform,
+		store:         newStore(),
+		runtimeStores: make(map[string]*store),
 	}
+}
+
+func newStore() *store {
+	return &store{
+		images:     make(map[string]Image),
+		digestSet:  digestset.NewSet(),
+		pinnedRefs: make(map[string]sets.Set[string]),
+	}
+}
+
+// runtimeStore requires the Store lock when the store is shared.
+func (s *Store) runtimeStore(handler string) *store {
+	if handler == "" {
+		return s.store
+	}
+	if st := s.runtimeStores[handler]; st != nil {
+		return st
+	}
+	st := newStore()
+	s.runtimeStores[handler] = st
+	return st
 }
 
 // Update updates cache for a reference.
@@ -106,6 +162,9 @@ func (s *Store) UpdateWithPlatform(ctx context.Context, ref string, platform pla
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
+	if _, _, err := ParseName(ref); err != nil {
+		return err
+	}
 	i, err := s.images.Get(ctx, ref)
 	if err != nil && !errdefs.IsNotFound(err) {
 		return fmt.Errorf("get image from containerd: %w", err)
@@ -113,6 +172,9 @@ func (s *Store) UpdateWithPlatform(ctx context.Context, ref string, platform pla
 
 	var img *Image
 	if err == nil {
+		if i.Name != ref {
+			return fmt.Errorf("image name %q does not match reference %q: %w", i.Name, ref, errdefs.ErrInvalidArgument)
+		}
 		img, err = s.getImage(ctx, i, platform)
 		if err != nil {
 			return fmt.Errorf("get image info from containerd: %w", err)
@@ -122,39 +184,54 @@ func (s *Store) UpdateWithPlatform(ctx context.Context, ref string, platform pla
 }
 
 // update updates the internal cache. img == nil means that
-// the image does not exist in containerd.
+// the image does not exist in containerd. The caller holds the Store lock.
 func (s *Store) update(ref string, img *Image) error {
+	_, handler, err := ParseName(ref)
+	if err != nil {
+		return err
+	}
+	if img != nil && img.RuntimeHandler != handler {
+		return fmt.Errorf("image runtime handler does not match reference %q: %w", ref, errdefs.ErrInvalidArgument)
+	}
 	oldID, oldExist := s.refCache[ref]
+	if img == nil && !oldExist {
+		return nil
+	}
+	st := s.runtimeStore(handler)
 	if img == nil {
-		// The image reference doesn't exist in containerd.
-		if oldExist {
-			// Remove the reference from the store.
-			s.store.delete(oldID, ref)
-			delete(s.refCache, ref)
-		}
+		// Remove the reference only from its owning runtime store.
+		st.delete(oldID, ref)
+		delete(s.refCache, ref)
 		return nil
 	}
 	if oldExist {
 		if oldID == img.ID {
-			if s.store.isPinned(img.ID, ref) == img.Pinned {
-				return nil
+			if err := st.add(*img); err != nil {
+				return err
 			}
-			if img.Pinned {
-				return s.store.pin(img.ID, ref)
+			if !img.Pinned {
+				return st.unpin(img.ID, ref)
 			}
-			return s.store.unpin(img.ID, ref)
+			return nil
 		}
 		// Updated. Remove tag from old image.
-		s.store.delete(oldID, ref)
+		st.delete(oldID, ref)
 	}
 	// New image. Add new image.
+	if err := st.add(*img); err != nil {
+		return err
+	}
 	s.refCache[ref] = img.ID
-	return s.store.add(*img)
+	return nil
 }
 
 // getImage gets image information from containerd for the given platform matcher.
 // A nil matcher keeps using the store default.
 func (s *Store) getImage(ctx context.Context, i images.Image, platform platforms.MatchComparer) (*Image, error) {
+	_, handler, err := ParseName(i.Name)
+	if err != nil {
+		return nil, err
+	}
 	if platform == nil {
 		platform = s.platform
 	}
@@ -188,12 +265,13 @@ func (s *Store) getImage(ctx context.Context, i images.Image, platform platforms
 	pinned := i.Labels[labels.PinnedImageLabelKey] == labels.PinnedImageLabelValue
 
 	return &Image{
-		ID:         id,
-		References: []string{i.Name},
-		ChainID:    chainID.String(),
-		Size:       size,
-		ImageSpec:  spec,
-		Pinned:     pinned,
+		ID:             id,
+		RuntimeHandler: handler,
+		References:     []string{i.Name},
+		ChainID:        chainID.String(),
+		Size:           size,
+		ImageSpec:      spec,
+		Pinned:         pinned,
 	}, nil
 
 }
@@ -209,16 +287,49 @@ func (s *Store) Resolve(ref string) (string, error) {
 	return id, nil
 }
 
-// Get gets image metadata by image id. The id can be truncated.
+// ResolveForRuntime resolves an image reference only within the given handler.
+func (s *Store) ResolveForRuntime(ref, handler string) (string, error) {
+	decoded, owner, err := ParseName(ref)
+	if err != nil {
+		return "", err
+	}
+	if owner != "" && owner != handler {
+		return "", errdefs.ErrNotFound
+	}
+	return s.Resolve(Name(decoded, handler))
+}
+
+// Get gets legacy image metadata by image id. The id can be truncated.
 // Returns various validation errors if the image id is invalid.
 // Returns errdefs.ErrNotFound if the image doesn't exist.
 func (s *Store) Get(id string) (Image, error) {
 	return s.store.get(id)
 }
 
-// List lists all images.
+// GetForRuntime gets image metadata only within the given handler.
+// The id can be truncated, but images from other handlers are never considered.
+func (s *Store) GetForRuntime(id, handler string) (Image, error) {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if handler == "" {
+		return s.store.get(id)
+	}
+	st := s.runtimeStores[handler]
+	if st == nil {
+		return Image{}, errdefs.ErrNotFound
+	}
+	return st.get(id)
+}
+
+// List lists all images, including separate entries for each runtime handler.
 func (s *Store) List() []Image {
-	return s.store.list()
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	images := s.store.list()
+	for _, st := range s.runtimeStores {
+		images = append(images, st.list()...)
+	}
+	return images
 }
 
 type store struct {
@@ -264,10 +375,10 @@ func (s *store) add(img Image) error {
 		s.images[img.ID] = img
 		return nil
 	}
-	// Or else, merge and sort the references.
-	i.References = docker.Sort(util.MergeStringSlices(i.References, img.References))
-	i.Pinned = i.Pinned || img.Pinned
-	s.images[img.ID] = i
+	// Refresh metadata while preserving references and pins from other names.
+	img.References = docker.Sort(util.MergeStringSlices(i.References, img.References))
+	img.Pinned = i.Pinned || img.Pinned
+	s.images[img.ID] = img
 	return nil
 }
 

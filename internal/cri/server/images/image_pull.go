@@ -51,6 +51,7 @@ import (
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/internal/cri/util"
 	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/containerd/v2/pkg/tracing"
@@ -178,7 +179,14 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
 	)
+	if err := c.imageMutationLocker.Lock(ctx, runtime.Name); err != nil {
+		return "", err
+	}
+	defer c.imageMutationLocker.Unlock(runtime.Name)
 	labels := c.getLabels(ctx, ref)
+	if runtime.Name != c.defaultRuntimeName {
+		labels[crilabels.ImageRuntimeHandlerLabelKey] = runtime.Name
+	}
 
 	// If UseLocalImagePull is true, use client.Pull to pull the image, else use transfer service by default.
 	//
@@ -233,6 +241,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		if r == "" {
 			continue
 		}
+		r = imagestore.Name(r, labels[crilabels.ImageRuntimeHandlerLabelKey])
 		if err := c.createOrUpdateImageReference(ctx, r, image.Target(), labels); err != nil {
 			return "", fmt.Errorf("failed to create image reference %q: %w", r, err)
 		}
@@ -297,6 +306,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 		containerd.WithPullSnapshotter(snapshotter),
 		containerd.WithPullUnpack,
 		containerd.WithPullLabels(labels),
+		containerd.WithPullImageName(imagestore.Name(ref, labels[crilabels.ImageRuntimeHandlerLabelKey])),
 		containerd.WithDownloadLimiter(c.downloadLimiter),
 		containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
 		containerd.WithConcurrentLayerFetchBuffer(c.config.ConcurrentLayerFetchBuffer),
@@ -362,7 +372,8 @@ func (c *CRIImageService) pullImageWithTransferService(
 		transferimage.WithImageLabels(labels),
 	}
 
-	is := transferimage.NewStore(ref, sopts...)
+	imageName := imagestore.Name(ref, labels[crilabels.ImageRuntimeHandlerLabelKey])
+	is := transferimage.NewStore(imageName, sopts...)
 
 	log.G(ctx).Debugf("Getting new CRI credentials")
 
@@ -389,9 +400,9 @@ func (c *CRIImageService) pullImageWithTransferService(
 	// Image should be pulled, unpacked and present in containerd image store at this moment
 	var image containerd.Image
 	if platform != nil {
-		image, err = c.client.GetImageWithPlatform(ctx, ref, platforms.Only(*platform))
+		image, err = c.client.GetImageWithPlatform(ctx, imageName, platforms.Only(*platform))
 	} else {
-		image, err = c.client.GetImage(ctx, ref)
+		image, err = c.client.GetImage(ctx, imageName)
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get image %q from containerd image store: %w", ref, err)
@@ -476,6 +487,9 @@ func (c *CRIImageService) createOrUpdateImageReference(ctx context.Context, name
 	if oldImg.Labels[crilabels.ImagePlatformLabelKey] != labels[crilabels.ImagePlatformLabelKey] {
 		fieldpaths = append(fieldpaths, "labels."+crilabels.ImagePlatformLabelKey)
 	}
+	if oldImg.Labels[crilabels.ImageRuntimeHandlerLabelKey] != labels[crilabels.ImageRuntimeHandlerLabelKey] {
+		fieldpaths = append(fieldpaths, "labels."+crilabels.ImageRuntimeHandlerLabelKey)
+	}
 	if oldImg.Target.Digest == img.Target.Digest && len(fieldpaths) < 2 {
 		return nil
 	}
@@ -510,6 +524,18 @@ func imagePlatformFromLabels(labels map[string]string) (platforms.MatchComparer,
 // in containerd. If the reference is not managed by the cri plugin, the function also
 // generates necessary metadata for the image and make it managed.
 func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
+	ref, handler, err := imagestore.ParseName(r)
+	if err != nil {
+		return err
+	}
+	lockHandler := handler
+	if lockHandler == "" {
+		lockHandler = c.defaultRuntimeName
+	}
+	if err := c.imageMutationLocker.Lock(ctx, lockHandler); err != nil {
+		return err
+	}
+	defer c.imageMutationLocker.Unlock(lockHandler)
 	// TODO: Use image service
 	img, err := c.client.GetImage(ctx, r)
 	if err != nil {
@@ -536,31 +562,26 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 	}
 
 	labels := img.Labels()
-	criLabels := c.getLabels(ctx, r)
+	criLabels := c.getLabels(ctx, ref)
+	if handler != "" {
+		criLabels[crilabels.ImageRuntimeHandlerLabelKey] = handler
+	}
 	if value := labels[crilabels.ImagePlatformLabelKey]; value != "" {
 		criLabels[crilabels.ImagePlatformLabelKey] = value
 	}
-	for key, value := range criLabels {
-		if labels[key] != value {
-			// Make sure the image has the image id as its unique
-			// identifier that references the image in its lifetime.
-			configDesc, err := img.Config(ctx)
-			if err != nil {
-				return fmt.Errorf("get image id: %w", err)
-			}
-			id := configDesc.Digest.String()
-			if err := c.createOrUpdateImageReference(ctx, id, img.Target(), criLabels); err != nil {
-				return fmt.Errorf("create image id reference %q: %w", id, err)
-			}
-			if err := c.imageStore.UpdateWithPlatform(ctx, id, platform); err != nil {
-				return fmt.Errorf("update image store for %q: %w", id, err)
-			}
-			// The image id is ready, add the label to mark the image as managed.
-			if err := c.createOrUpdateImageReference(ctx, r, img.Target(), criLabels); err != nil {
-				return fmt.Errorf("create managed label: %w", err)
-			}
-			break
-		}
+	configDesc, err := img.Config(ctx)
+	if err != nil {
+		return fmt.Errorf("get image id: %w", err)
+	}
+	id := imagestore.Name(configDesc.Digest.String(), handler)
+	if err := c.createOrUpdateImageReference(ctx, id, img.Target(), criLabels); err != nil {
+		return fmt.Errorf("create image id reference %q: %w", id, err)
+	}
+	if err := c.imageStore.UpdateWithPlatform(ctx, id, platform); err != nil {
+		return fmt.Errorf("update image store for %q: %w", id, err)
+	}
+	if err := c.createOrUpdateImageReference(ctx, r, img.Target(), criLabels); err != nil {
+		return fmt.Errorf("create managed label: %w", err)
 	}
 	if err := c.imageStore.UpdateWithPlatform(ctx, r, platform); err != nil {
 		return fmt.Errorf("update image store for %q: %w", r, err)

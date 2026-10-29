@@ -21,8 +21,10 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/core/images"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/pkg/tracing"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -44,7 +46,15 @@ func (c *GRPCCRIImageService) RemoveImage(ctx context.Context, r *runtime.Remove
 func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.ImageSpec) error {
 	span := tracing.SpanFromContext(ctx)
 
-	image, err := c.LocalResolve(imageSpec.GetImage())
+	h, err := c.resolveRuntimeHandler(imageSpec.GetRuntimeHandler())
+	if err != nil {
+		return err
+	}
+	if err := c.imageMutationLocker.Lock(ctx, h.Name); err != nil {
+		return err
+	}
+	defer c.imageMutationLocker.Unlock(h.Name)
+	image, err := c.LocalResolve(imageSpec.GetImage(), imageSpec.GetRuntimeHandler())
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			span.AddEvent(err.Error())
@@ -54,14 +64,50 @@ func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.Im
 		return fmt.Errorf("can not resolve %q locally: %w", imageSpec.GetImage(), err)
 	}
 	span.SetAttributes(tracing.Attribute("image.id", image.ID))
+	persisted, err := c.images.List(ctx)
+	if err != nil {
+		return err
+	}
+	var references []images.Image
+	for _, img := range persisted {
+		_, handler, err := imagestore.ParseName(img.Name)
+		if err != nil || (handler != h.Name && (handler != "" || h.Name != c.defaultRuntimeName)) {
+			continue
+		}
+		matcher, err := imagePlatformFromLabels(img.Labels)
+		if err != nil {
+			return err
+		}
+		if matcher == nil {
+			matcher = platforms.Default()
+		}
+		candidate, err := c.client.GetImageWithPlatform(ctx, img.Name, matcher)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		config, err := candidate.Config(ctx)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if config.Digest.String() == image.ID {
+			references = append(references, img)
+		}
+	}
 	// Remove all image references.
-	for i, ref := range image.References {
-		var opts []images.DeleteOpt
-		if i == len(image.References)-1 {
+	for i, img := range references {
+		ref := img.Name
+		opts := []images.DeleteOpt{images.DeleteTarget(&img.Target)}
+		if i == len(references)-1 {
 			// Delete the last image reference synchronously to trigger garbage collection.
 			// This is best effort. It is possible that the image reference is deleted by
 			// someone else before this point.
-			opts = []images.DeleteOpt{images.SynchronousDelete()}
+			opts = append(opts, images.SynchronousDelete())
 		}
 		err = c.images.Delete(ctx, ref, opts...)
 		if err == nil || errdefs.IsNotFound(err) {

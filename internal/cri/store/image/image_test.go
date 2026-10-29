@@ -316,3 +316,83 @@ func TestImageStore(t *testing.T) {
 		})
 	}
 }
+
+func TestImageStoreRuntimeHandlers(t *testing.T) {
+	assert := assertlib.New(t)
+	id := "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	ref := "containerd.io/ref-1"
+	for _, handler := range []string{"", "runc", "kata/test"} {
+		for _, ref := range []string{ref, id} {
+			name := Name(ref, handler)
+			decoded, owner, err := ParseName(name)
+			assert.NoError(err)
+			assert.Equal(ref, decoded)
+			assert.Equal(handler, owner)
+		}
+	}
+	for _, name := range []string{
+		strings.TrimSuffix(namePrefix, "/"), namePrefix, namePrefix + "/cmVm",
+		namePrefix + "cnVuYw/", namePrefix + "!/cmVm", namePrefix + "cnVuYw/!",
+		namePrefix + "cnVuYw/cmVm/extra", namePrefix + "cnVuYw==/cmVm",
+		namePrefix + "YR/cmVm", namePrefix + "cnVuYw/YR", namePrefix + "cnVuYw\n/cmVm",
+	} {
+		_, _, err := ParseName(name)
+		assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+	}
+
+	s, err := NewFakeStore([]Image{
+		{ID: id, References: []string{ref}},
+		{ID: id, RuntimeHandler: "runc", References: []string{ref}, Pinned: true},
+		{ID: id, RuntimeHandler: "kata", References: []string{ref}},
+	})
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Len(s.List(), 3)
+	for _, handler := range []string{"", "runc", "kata"} {
+		got, err := s.GetForRuntime("1123456789", handler)
+		assert.NoError(err)
+		assert.Equal(handler, got.RuntimeHandler)
+		assert.Equal([]string{Name(ref, handler)}, got.References)
+		assert.Equal(handler == "runc", got.Pinned)
+		resolved, err := s.ResolveForRuntime(ref, handler)
+		assert.NoError(err)
+		assert.Equal(id, resolved)
+	}
+	_, err = s.GetForRuntime(id, "missing")
+	assert.ErrorIs(err, errdefs.ErrNotFound)
+	_, err = s.ResolveForRuntime(ref, "missing")
+	assert.ErrorIs(err, errdefs.ErrNotFound)
+	_, err = s.ResolveForRuntime(Name(ref, "runc"), "kata")
+	assert.ErrorIs(err, errdefs.ErrNotFound)
+
+	alias := Name("containerd.io/alias", "runc")
+	runc := Image{ID: id, RuntimeHandler: "runc", References: []string{alias}, Size: 20}
+	assert.NoError(s.update(alias, &runc))
+	assert.NoError(s.update(Name(ref, "runc"), nil))
+	got, err := s.GetForRuntime(id, "runc")
+	assert.NoError(err)
+	assert.False(got.Pinned)
+	assert.Equal([]string{alias}, got.References)
+	assert.Equal(int64(20), got.Size)
+
+	runc.Pinned = true
+	runc.Size = 30
+	assert.NoError(s.update(alias, &runc))
+	got, err = s.GetForRuntime(id, "runc")
+	assert.NoError(err)
+	assert.True(got.Pinned)
+	assert.Equal(int64(30), got.Size)
+	assert.NoError(s.update(alias, nil))
+	_, err = s.GetForRuntime(id, "runc")
+	assert.ErrorIs(err, errdefs.ErrNotFound)
+	_, err = s.ResolveForRuntime(ref, "runc")
+	assert.ErrorIs(err, errdefs.ErrNotFound)
+	assert.Len(s.List(), 2)
+	for _, handler := range []string{"", "kata"} {
+		got, err = s.GetForRuntime(id, handler)
+		assert.NoError(err)
+		assert.False(got.Pinned)
+		assert.Equal([]string{Name(ref, handler)}, got.References)
+	}
+}

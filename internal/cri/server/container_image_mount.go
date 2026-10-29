@@ -39,6 +39,7 @@ func (c *criService) mutateMounts(
 	extraMounts []*runtime.Mount,
 	snapshotter string,
 	sandboxID string,
+	runtimeHandler string,
 	platform imagespec.Platform,
 ) error {
 	if err := c.ensureLeaseExist(ctx, sandboxID); err != nil {
@@ -47,7 +48,7 @@ func (c *criService) mutateMounts(
 
 	ctx = leases.WithLease(ctx, sandboxID)
 	for _, m := range extraMounts {
-		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID, platform)
+		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID, runtimeHandler, platform)
 		if err != nil {
 			return fmt.Errorf("%w: %w", crierrors.ErrImageVolumeMountFailed, err)
 		}
@@ -71,6 +72,7 @@ func (c *criService) mutateImageMount(
 	extraMount *runtime.Mount,
 	snapshotter string,
 	sandboxID string,
+	runtimeHandler string,
 	platform imagespec.Platform,
 ) error {
 	imageSpec := extraMount.GetImage()
@@ -88,7 +90,7 @@ func (c *criService) mutateImageMount(
 	if ref == "" {
 		return fmt.Errorf("image not specified in: %+v", imageSpec)
 	}
-	image, err := c.LocalResolve(ref)
+	image, err := c.LocalResolve(ref, runtimeHandler)
 	if err != nil {
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
@@ -111,7 +113,7 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to ensure %s is mounted: %w", target, err)
 	}
 	if !mounted {
-		img, err := c.client.ImageService().Get(ctx, ref)
+		img, err := c.client.ImageService().Get(ctx, containerdImage.Name())
 		if err != nil {
 			return fmt.Errorf("failed to get image volume ref %q: %w", ref, err)
 		}

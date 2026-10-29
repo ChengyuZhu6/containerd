@@ -32,6 +32,7 @@ import (
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/opencontainers/selinux/go-selinux/label"
+	"google.golang.org/protobuf/proto"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -42,6 +43,7 @@ import (
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
 	customopts "github.com/containerd/containerd/v2/internal/cri/opts"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
 	"github.com/containerd/containerd/v2/internal/cri/util"
 	"github.com/containerd/containerd/v2/internal/registrar"
@@ -128,10 +130,17 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 
 	// Prepare container image snapshot. For container, the image should have
 	// been pulled before creating the container, so do not ensure the image.
-	image, err := c.LocalResolve(config.GetImage().GetImage())
+	runtimeHandler, err := c.effectiveSandboxRuntimeHandler(sandbox.Config, sandbox.RuntimeHandler)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
+	}
+	image, err := c.LocalResolve(config.GetImage().GetImage(), runtimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve image %q: %w", config.GetImage().GetImage(), err)
 	}
+	config = proto.Clone(config).(*runtime.ContainerConfig)
+	config.Image.RuntimeHandler = image.RuntimeHandler
+	meta.Config = config
 	containerdImage, err := c.toContainerdImage(ctx, image)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
@@ -237,7 +246,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	}
 
 	// mutate the extra CRI volume mounts from the runtime spec to properly specify the OCI image volume mount requests as bind mounts for this container
-	err = c.mutateMounts(r.ctx, r.containerConfig.GetMounts(), c.RuntimeSnapshotter(r.ctx, ociRuntime), r.sandboxID, platform)
+	err = c.mutateMounts(r.ctx, r.containerConfig.GetMounts(), c.RuntimeSnapshotter(r.ctx, ociRuntime), r.sandboxID, r.containerConfig.GetImage().GetRuntimeHandler(), platform)
 	if err != nil {
 		return "", fmt.Errorf("failed to mount image volume: %w", err)
 	}
@@ -328,7 +337,10 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	}
 	r.meta.ImageRef = r.imageID
 	r.meta.ImageDigest = (*r.containerdImage).Target().Digest.String()
-	r.meta.ImageName = (*r.containerdImage).Name()
+	r.meta.ImageName, _, err = imagestore.ParseName((*r.containerdImage).Name())
+	if err != nil {
+		return "", err
+	}
 	if signal := r.containerConfig.GetStopSignal(); signal != runtime.Signal_SIGNAL_RUNTIME_DEFAULT {
 		stopSignal, err := criSignalToOCIStopSignal(signal)
 		if err != nil {
