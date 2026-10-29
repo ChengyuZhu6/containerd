@@ -60,7 +60,7 @@ Implementation:
 - [ ] Maintainer/human review and submission. No remote PR has been created.
 
 Implementation commit: `18a6f3913`.
-Integration commit: `463049f64`; subsequent validation updates extend the same test.
+Integration commit: `97ae85160`; validation and documentation commit: `35e1f1632`.
 
 ## Reproduction and validation: 2026-10-29
 
