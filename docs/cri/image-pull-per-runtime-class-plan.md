@@ -143,9 +143,74 @@ scripts are ignored local artifacts, not submitted source.
 Test Pods, processes and empty test cgroups were cleaned up. The original production
 node remained Ready, with its original services and configuration unchanged.
 
+## Local Kubernetes fix and joint validation: 2026-10-30
+
+The user-provided `/root/kubernetes` repository at
+`0ab0f61c671640360c374426014610583fc9afb0` still omitted the runtime handler in
+`kuberuntime.RemoveImage`. The extended existing deletion test failed only with the
+feature enabled: expected `runc`, received an empty handler.
+
+A separate Kubernetes branch, `fix/kubelet-image-gc-runtime-handler`, contains commit
+`ad9ac018c44043df0fcfb1a08c1c65d5ee352fb2`. The production change is one line:
+`RemoveImage` uses the existing `ToRuntimeAPIImageSpec` conversion, preserving the
+handler only when `RuntimeClassInImageCriApi` is enabled. The existing test was extended
+to inspect the actual service request for gate enabled/disabled and an empty handler;
+existing deletion, error and idempotence tests remain. No gate defaults, generated
+files, dependencies or GC algorithm were changed.
+
+`pkg/kubelet/kuberuntime` and `pkg/kubelet/images` package tests, race tests and
+`go vet` passed with the repository's specified Go `1.27.3`. Both kubelet and
+kube-apiserver were built from the fixed commit. The local Git checkout only had an
+old `v1.31.0-alpha.0` ancestor tag, so default build metadata failed the API compatibility
+check. The test build explicitly used `v1.38.0-alpha.0+ad9ac018c44043`, matching the
+source's `DefaultKubeBinaryVersion=1.38` and retaining the real commit. This is a
+self-built development version, not an official Kubernetes release.
+
+Joint validation used containerd commit
+`69d81d801d305ed853bc2ef16bf2c2e47029ae88` in two same-node isolated API/etcd/kubelet/runtime
+environments. They had different data directories, ports, Pod cgroup roots and private
+mount namespaces for the kubelet's fixed device-plugin directory. A transparent CRI
+proxy preserved raw requests. No image was pre-registered and the test never issued a
+manual `RemoveImage`; the unmodified five-minute kubelet age-GC loop drove removal.
+
+| Check | Gate enabled | Gate disabled |
+| --- | --- | --- |
+| Running configuration reports requested gate state | Passed | Passed |
+| Real host-architecture Pods are automatically pulled and reach Ready | A/B handler pulls | Empty-handler/default pulls |
+| Delete one Pod while retaining the other | A automatically collected; B kept | Shared default image stays in use |
+| CRI deletion context | Handler `a`, then `b` on final deletion | Empty handler on final deletion |
+| New Pod with `imagePullPolicy: Never` | Ready without repull | Ready without repull |
+| Retained Pod identity and restart count | Unchanged | Unchanged |
+| Delete remaining Pods and await automatic GC | Last B association removed | Default association removed |
+| Config content and native chain snapshot collected after final GC | Passed | Passed |
+| Test exit code | 0 | 0 |
+
+Gate-enabled automatic requests carried `a` at `2026-10-30T05:46:06Z` and `b` at
+`2026-10-30T05:51:06Z`. The gate-disabled request carried an empty handler at
+`2026-10-30T05:51:07Z`. Final read-only resource checks confirmed both config content
+and native snapshots were collected. This resolves the observed deletion-context
+blocker for the tested source combination, but does not mean an unmodified official
+release or all Kubernetes/CRI suites now pass.
+
+Evidence under `_output/pr2/k8s-joint/`: `unit-before.log`, `unit-after.log`,
+`remove-tests-final.log`, `race.log`, `vet.log`, exact commit files and binary checksums;
+`enabled/` and `disabled/` each contain `configz.json`, `cri-requests.jsonl`, `result.json`,
+`test.exit`, Pod snapshots, image observations and `final-resources.json`. Tests are
+process-level targeted end-to-end checks, not the official Kubernetes e2e suite; no
+scheduler/controller manager or cluster CNI was needed for these host-network Pods.
+
+All isolated Pods, test processes, ports and empty test cgroups were cleaned up.
+During initial setup, the fixed device-plugin path conflicted with the original kubelet;
+the test kubelet was stopped and the original kubelet restarted to restore its socket,
+then private mount isolation was applied. Production binaries/configuration were not
+replaced. The production node remained Ready and kube-system container IDs/restart
+counts were unchanged. Two pre-existing `sleep 900` Pods completed normally at their
+15-minute interval and restarted, so the strict all-Pod identity cleanup assertion did
+not pass; this was separately verified and recorded in `cleanup-result.json`.
+
 ## Next steps
 
 1. Review the compatibility contract and the complete feature diff; keep PR-1 separate.
 2. Resolve full-suite environment blockers and record all skips and failures, including any unclassified integration failures.
-3. Track a Kubernetes-side fix or a verified release that preserves the handler through the final CRI deletion call, then rerun the same automatic-GC test. Do not weaken containerd isolation or silently patch the downloaded kubelet to claim a release passes.
-4. Obtain independent maintainer review before opening a PR. All implementation and review communication require human review.
+3. Submit the independently reviewed Kubernetes deletion fix separately from the containerd feature, then retest an official release containing it. The self-built joint test does not change the earlier official-release failure result.
+4. Obtain independent maintainer review before opening either PR. All implementation and review communication require human review.
