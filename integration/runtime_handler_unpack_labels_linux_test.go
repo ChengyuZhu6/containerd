@@ -256,11 +256,15 @@ func TestImagePlatformConsumption(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, selectedChain, snapshot.Parent)
 			} else {
-				config := ContainerConfig("platform", source, WithCommand("sleep", "300"))
+				config := ContainerConfig("platform", source, WithCommand("sleep", "300"),
+					WithImageVolumeMount(source, "", "/selected-image"))
 				cn, err := rSvc.CreateContainer(sb, config, sbConfig)
 				require.NoError(t, err)
 				require.NoError(t, rSvc.StartContainer(cn))
 				stdout, stderr, err := rSvc.ExecSync(cn, []string{"cat", "/pr1-platform"}, time.Minute)
+				require.NoError(t, err, string(stderr))
+				assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
+				stdout, stderr, err = rSvc.ExecSync(cn, []string{"cat", "/selected-image/pr1-platform"}, time.Minute)
 				require.NoError(t, err, string(stderr))
 				assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
 				status, err := rSvc.ContainerStatus(cn)

@@ -87,14 +87,15 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox image %q: %w", normalized.String(), err)
 	}
-	pauseImage := containerd.NewImage(c.client, image)
+	matcher := platforms.Default()
 	if value := image.Labels[crilabels.ImagePlatformLabelKey]; value != "" {
 		platform, err := platforms.Parse(value)
 		if err != nil {
 			return cin, fmt.Errorf("failed to get sandbox image platform %q: %w", value, err)
 		}
-		pauseImage = containerd.NewImageWithPlatform(c.client, image, platforms.Only(platform))
+		matcher = platforms.Only(platform)
 	}
+	pauseImage := containerd.NewImageWithPlatform(c.client, image, matcher)
 
 	// Get the image spec from containerd image
 	imageSpec, err := pauseImage.Spec(ctx)

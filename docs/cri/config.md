@@ -22,6 +22,15 @@ converted to the config version 3.
 For the further information, see [`../PLUGINS.md`](../PLUGINS.md).
 
 ## Basic configuration
+
+### Image platform selection
+
+CRI preserves the image config selected during resolution when consuming a multi-platform
+image. Container roots, sandbox roots, image volumes and unpack fallback use the same
+manifest, rather than selecting the host platform again. Persisted image targets and
+reported manifest/index digests are unchanged. This uses existing runtime platform and
+snapshotter settings; it does not introduce new per-RuntimeClass configuration.
+
 ### Cgroup Driver
 While containerd and Kubernetes use the legacy `cgroupfs` driver for managing cgroups by default,
 it is recommended to use the `systemd` driver on systemd-based hosts for compliance of

@@ -102,6 +102,46 @@ func TestToContainerdImage(t *testing.T) {
 	assert.Equal(t, index.Descriptor, stored.Target)
 	assert.Equal(t, index.Descriptor.Digest.String(), imageDigest)
 
+	stableID := selected.ID
+	repoDigest := "example.com/image@" + index.Descriptor.Digest.String()
+	selected.References = []string{img.Name, stableID, repoDigest}
+	for _, mutation := range []string{"retag", "delete", "stale ID"} {
+		t.Run(mutation, func(t *testing.T) {
+			for _, ref := range []string{stableID, repoDigest} {
+				_, err := imageService.Create(ctx, images.Image{Name: ref, Target: index.Descriptor})
+				require.NoError(t, err)
+			}
+			t.Cleanup(func() {
+				for _, ref := range []string{stableID, repoDigest} {
+					assert.NoError(t, imageService.Delete(ctx, ref))
+				}
+				if mutation == "delete" {
+					_, err := imageService.Create(ctx, images.Image{Name: img.Name, Target: index.Descriptor})
+					assert.NoError(t, err)
+				} else {
+					_, err := imageService.Update(ctx, images.Image{Name: img.Name, Target: index.Descriptor}, "target")
+					assert.NoError(t, err)
+				}
+			})
+			if mutation == "delete" {
+				require.NoError(t, imageService.Delete(ctx, img.Name))
+			} else {
+				_, err := imageService.Update(ctx, images.Image{Name: img.Name, Target: manifests[0].Descriptor}, "target")
+				require.NoError(t, err)
+			}
+			if mutation == "stale ID" {
+				_, err := imageService.Update(ctx, images.Image{Name: stableID, Target: manifests[0].Descriptor}, "target")
+				require.NoError(t, err)
+			}
+			converted, imageDigest, err := c.toContainerdImage(ctx, selected)
+			require.NoError(t, err)
+			config, err := converted.Config(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, selected.ID, config.Digest.String())
+			assert.Equal(t, index.Descriptor.Digest.String(), imageDigest)
+		})
+	}
+
 	selected.ID = digest.FromString("stale").String()
 	_, _, err = c.toContainerdImage(ctx, selected)
 	require.Error(t, err)

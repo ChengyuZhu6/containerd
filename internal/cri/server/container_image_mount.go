@@ -22,14 +22,12 @@ import (
 	"os"
 	"path/filepath"
 
-	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/containerd/platforms"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
-	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	crierrors "k8s.io/cri-api/pkg/errors"
 )
@@ -39,7 +37,6 @@ func (c *criService) mutateMounts(
 	extraMounts []*runtime.Mount,
 	snapshotter string,
 	sandboxID string,
-	platform imagespec.Platform,
 ) error {
 	if err := c.ensureLeaseExist(ctx, sandboxID); err != nil {
 		return fmt.Errorf("failed to ensure lease %v for sandbox: %w", sandboxID, err)
@@ -47,7 +44,7 @@ func (c *criService) mutateMounts(
 
 	ctx = leases.WithLease(ctx, sandboxID)
 	for _, m := range extraMounts {
-		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID, platform)
+		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID)
 		if err != nil {
 			return fmt.Errorf("%w: %w", crierrors.ErrImageVolumeMountFailed, err)
 		}
@@ -71,7 +68,6 @@ func (c *criService) mutateImageMount(
 	extraMount *runtime.Mount,
 	snapshotter string,
 	sandboxID string,
-	platform imagespec.Platform,
 ) error {
 	imageSpec := extraMount.GetImage()
 	if imageSpec == nil {
@@ -92,12 +88,8 @@ func (c *criService) mutateImageMount(
 	if err != nil {
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
-	img, err := c.client.ImageService().Get(ctx, image.References[0])
-	if err != nil {
-		return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
-	}
-
-	imageID := img.Target.Digest.Encoded()
+	imageSpec.Image = image.ID
+	imageID := digest.Digest(image.ID).Encoded()
 
 	target := c.getImageVolumeHostPath(sandboxID, imageID)
 
@@ -110,7 +102,10 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to ensure %s is mounted: %w", target, err)
 	}
 	if !mounted {
-		i := containerd.NewImageWithPlatform(c.client, img, platforms.Only(platform))
+		i, _, err := c.toContainerdImage(ctx, image)
+		if err != nil {
+			return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
+		}
 		if err := i.Unpack(ctx, snapshotter); err != nil {
 			return fmt.Errorf("failed to unpack image volume: %w", err)
 		}

@@ -28,19 +28,17 @@ import (
 	"time"
 
 	"github.com/containerd/typeurl/v2"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
-	"github.com/containerd/containerd/v2/core/images"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
+	customopts "github.com/containerd/containerd/v2/internal/cri/opts"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/containerd/platforms"
 )
 
 // TODO: Move common helpers for sbserver and podsandbox to a dedicated package once basic services are functional.
@@ -170,47 +168,25 @@ func criContainerStateToString(state runtime.ContainerState) string {
 
 // toContainerdImage converts an image object in image store to containerd image handler.
 func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, string, error) {
-	// image should always have at least one reference.
 	if len(image.References) == 0 {
 		return nil, "", fmt.Errorf("invalid image with no reference %q", image.ID)
 	}
-	i, err := c.client.ImageService().Get(ctx, image.References[0])
-	if err != nil {
-		return nil, "", err
-	}
-	var manifest ocispec.Descriptor
-	err = images.Walk(ctx, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		if manifest.MediaType != "" {
-			return nil, nil
-		}
-		if images.IsManifestType(desc.MediaType) {
-			config, err := images.Config(ctx, c.client.ContentStore(), desc, nil)
-			if err != nil {
-				if errdefs.IsNotFound(err) {
-					return nil, nil
-				}
-				return nil, err
+	var lastErr error
+	for _, name := range image.References {
+		i, err := c.client.ImageService().Get(ctx, name)
+		if err == nil {
+			var converted containerd.Image
+			converted, err = customopts.ImageForConfig(ctx, c.client, i, image.ID)
+			if err == nil {
+				return converted, i.Target.Digest.String(), nil
 			}
-			if config.Digest.String() == image.ID {
-				manifest = desc
-			}
-			return nil, nil
 		}
-		children, err := images.Children(ctx, c.client.ContentStore(), desc)
-		if errdefs.IsNotFound(err) && desc.Digest != i.Target.Digest {
-			return nil, nil
+		if !errdefs.IsNotFound(err) {
+			return nil, "", err
 		}
-		return children, err
-	}), i.Target)
-	if err != nil {
-		return nil, "", err
+		lastErr = err
 	}
-	if manifest.MediaType == "" {
-		return nil, "", fmt.Errorf("image %q has no manifest for config %q: %w", i.Name, image.ID, errdefs.ErrNotFound)
-	}
-	digest := i.Target.Digest.String()
-	i.Target = manifest
-	return containerd.NewImageWithPlatform(c.client, i, platforms.All), digest, nil
+	return nil, "", lastErr
 }
 
 // getUserFromImage gets uid or user name of the image user.
