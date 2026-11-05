@@ -28,7 +28,6 @@ import (
 	"github.com/containerd/log"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
-	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	crierrors "k8s.io/cri-api/pkg/errors"
 )
@@ -39,7 +38,6 @@ func (c *criService) mutateMounts(
 	snapshotter string,
 	sandboxID string,
 	runtimeHandler string,
-	platform imagespec.Platform,
 ) error {
 	if err := c.ensureLeaseExist(ctx, sandboxID); err != nil {
 		return fmt.Errorf("failed to ensure lease %v for sandbox: %w", sandboxID, err)
@@ -47,7 +45,7 @@ func (c *criService) mutateMounts(
 
 	ctx = leases.WithLease(ctx, sandboxID)
 	for _, m := range extraMounts {
-		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID, runtimeHandler, platform)
+		err := c.mutateImageMount(ctx, m, snapshotter, sandboxID, runtimeHandler)
 		if err != nil {
 			return fmt.Errorf("%w: %w", crierrors.ErrImageVolumeMountFailed, err)
 		}
@@ -72,7 +70,6 @@ func (c *criService) mutateImageMount(
 	snapshotter string,
 	sandboxID string,
 	runtimeHandler string,
-	platform imagespec.Platform,
 ) error {
 	imageSpec := extraMount.GetImage()
 	if imageSpec == nil {
@@ -94,12 +91,7 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
 	imageSpec.RuntimeHandler = image.RuntimeHandler
-	containerdImage, imageDigest, err := c.toContainerdImage(ctx, image)
-	if err != nil {
-		return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
-	}
-
-	imageID := digest.Digest(imageDigest).Encoded()
+	imageID := digest.Digest(image.ID).Encoded()
 
 	target := c.getImageVolumeHostPath(sandboxID, imageID)
 
@@ -112,7 +104,10 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to ensure %s is mounted: %w", target, err)
 	}
 	if !mounted {
-		i := containerdImage
+		i, _, err := c.toContainerdImage(ctx, image)
+		if err != nil {
+			return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
+		}
 		if err := i.Unpack(ctx, snapshotter); err != nil {
 			return fmt.Errorf("failed to unpack image volume: %w", err)
 		}

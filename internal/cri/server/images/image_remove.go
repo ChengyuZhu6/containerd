@@ -19,8 +19,10 @@ package images
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/containerd/containerd/v2/core/images"
+	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/pkg/tracing"
 	"github.com/containerd/errdefs"
@@ -72,6 +74,7 @@ func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.Im
 		return err
 	}
 	var references []images.Image
+	configs := make(map[[3]string]string)
 	for _, img := range persisted {
 		_, handler, err := imagestore.ParseName(img.Name)
 		if err != nil || (handler != h.Name && (handler != "" || h.Name != c.defaultRuntimeName)) {
@@ -85,21 +88,27 @@ func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.Im
 		if matcher == nil {
 			matcher = platforms.Default()
 		}
-		candidate, err := c.client.GetImageWithPlatform(ctx, img.Name, matcher)
-		if err != nil {
-			if errdefs.IsNotFound(err) {
+		key := [3]string{img.Target.MediaType, img.Target.Digest.String(), img.Labels[crilabels.ImagePlatformLabelKey]}
+		configID, ok := configs[key]
+		if !ok {
+			config, err := img.Config(ctx, c.content, matcher)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if errdefs.IsNotFound(err) {
+					continue
+				}
+				if slices.Contains(image.References, img.Name) {
+					return err
+				}
+				log.G(ctx).WithError(err).Warnf("Skipping unrelated image %q with invalid manifest", img.Name)
 				continue
 			}
-			return err
+			configID = config.Digest.String()
+			configs[key] = configID
 		}
-		config, err := candidate.Config(ctx)
-		if err != nil {
-			if errdefs.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
-		if config.Digest.String() == image.ID {
+		if configID == image.ID {
 			references = append(references, img)
 		}
 	}

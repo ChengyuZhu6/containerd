@@ -28,8 +28,10 @@ import (
 	"testing/synctest"
 	"time"
 
+	transfertypes "github.com/containerd/containerd/api/types/transfer"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	"github.com/containerd/typeurl/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -40,7 +42,6 @@ import (
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/metadata"
 	"github.com/containerd/containerd/v2/core/transfer"
-	transferimage "github.com/containerd/containerd/v2/core/transfer/image"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/labels"
@@ -528,6 +529,7 @@ func TestRuntimeHandlerPullBackends(t *testing.T) {
 					require.NoError(t, opt(nil, remote))
 				}
 				require.Equal(t, "native", remote.Snapshotter)
+				require.Equal(t, imagestore.Name("example.com/test:latest", "native"), remote.ImageName)
 				require.True(t, remote.PlatformMatcher.Match(platform))
 				return nil, errdefs.ErrUnavailable
 			},
@@ -537,14 +539,20 @@ func TestRuntimeHandlerPullBackends(t *testing.T) {
 			config: criconfig.ImageConfig{DisableSnapshotAnnotations: true},
 		}
 
-		_, _, err := c.pullImageWithLocalPull(context.Background(), "example.com/test:latest", nil, "native", &platform, nil, time.Minute)
+		_, _, err := c.pullImageWithLocalPull(context.Background(), "example.com/test:latest", imagestore.Name("example.com/test:latest", "native"), nil, "native", &platform, nil, time.Minute)
 		require.ErrorIs(t, err, errdefs.ErrUnavailable)
 	})
 
 	t.Run("transfer pull", func(t *testing.T) {
 		transferrer := &pullTestTransferrer{
 			transfer: func(_ context.Context, _, destination any, _ ...transfer.Opt) error {
-				store := destination.(*transferimage.Store)
+				store := destination.(*pullImageStore)
+				encoded, err := store.MarshalAny(context.Background(), nil)
+				require.NoError(t, err)
+				var destinationSpec transfertypes.ImageStore
+				require.NoError(t, typeurl.UnmarshalTo(encoded, &destinationSpec))
+				require.Equal(t, imagestore.Name("example.com/test:latest", "native"), destinationSpec.Name)
+				store.images = []ctrdimages.Image{{Name: destinationSpec.Name}}
 				require.Equal(t, []ocispec.Platform{platform}, store.Platforms())
 				require.Equal(t, platform, store.UnpackPlatforms()[0].Platform)
 				require.Equal(t, "native", store.UnpackPlatforms()[0].Snapshotter)
@@ -552,14 +560,14 @@ func TestRuntimeHandlerPullBackends(t *testing.T) {
 			},
 		}
 		client := &pullTestClient{
-			getImageWithPlatform: func(_ context.Context, ref string, matcher platforms.MatchComparer) (containerd.Image, error) {
+			imageFromRecord: func(image ctrdimages.Image, matcher platforms.MatchComparer) containerd.Image {
 				require.True(t, matcher.Match(platform))
-				return containerd.NewImageWithPlatform(&containerd.Client{}, ctrdimages.Image{Name: ref}, matcher), nil
+				return containerd.NewImageWithPlatform(&containerd.Client{}, image, matcher)
 			},
 		}
 		c := &CRIImageService{client: client, transferrer: transferrer}
 
-		image, _, err := c.pullImageWithTransferService(context.Background(), "example.com/test:latest", nil, "native", &platform, nil, time.Minute)
+		image, _, err := c.pullImageWithTransferService(context.Background(), "example.com/test:latest", imagestore.Name("example.com/test:latest", "native"), nil, "native", &platform, nil, time.Minute)
 		require.NoError(t, err)
 		require.True(t, image.Platform().Match(platform))
 	})
@@ -688,11 +696,61 @@ func TestRemoveImageInvalidUnrelatedPlatform(t *testing.T) {
 	_, err = c.images.Create(ctx, ctrdimages.Image{Name: "example.com/broken:latest", Target: manifest.Descriptor,
 		Labels: map[string]string{labels.ImagePlatformLabelKey: "invalid platform"}})
 	require.NoError(t, err)
+	c.client = &pullTestClient{getImageWithPlatform: func(context.Context, string, platforms.MatchComparer) (containerd.Image, error) {
+		t.Error("RemoveImage must use the listed image record without fetching the mutable reference again")
+		return nil, errdefs.ErrUnavailable
+	}}
 	require.NoError(t, c.RemoveImage(ctx, &runtime.ImageSpec{Image: config.Descriptor.Digest.String()}))
 	_, err = c.LocalResolve(ref, "")
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
 	_, err = c.images.Get(ctx, "example.com/broken:latest")
 	require.NoError(t, err)
+}
+
+func TestRemoveImageInvalidUnrelatedManifest(t *testing.T) {
+	ctx, c, cs := newImageEventService(t)
+	config := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platforms.DefaultSpec(), RootFS: ocispec.RootFS{Type: "layers"}})
+	manifest := cs.Manifest(config)
+	ref := "example.com/healthy:latest"
+	_, err := c.images.Create(ctx, ctrdimages.Image{Name: ref, Target: manifest.Descriptor})
+	require.NoError(t, err)
+	require.NoError(t, c.UpdateImage(ctx, ref))
+	broken := cs.Blob(ocispec.MediaTypeImageManifest, []byte("{"))
+	_, err = c.images.Create(ctx, ctrdimages.Image{Name: "example.com/broken:latest", Target: broken.Descriptor})
+	require.NoError(t, err)
+	require.NoError(t, c.RemoveImage(ctx, &runtime.ImageSpec{Image: config.Descriptor.Digest.String()}))
+	_, err = c.LocalResolve(ref, "")
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, err = c.images.Get(ctx, "example.com/broken:latest")
+	require.NoError(t, err)
+}
+
+func TestTransferPullPreservesStoredTarget(t *testing.T) {
+	for _, mutation := range []string{"delete", "retag"} {
+		t.Run(mutation, func(t *testing.T) {
+			ctx, c, cs := newImageEventService(t)
+			config := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platforms.DefaultSpec(), RootFS: ocispec.RootFS{Type: "layers"}})
+			manifest := cs.Manifest(config)
+			other := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platforms.DefaultSpec(), Config: ocispec.ImageConfig{Env: []string{"VERSION=other"}}, RootFS: ocispec.RootFS{Type: "layers"}})
+			otherManifest := cs.Manifest(other)
+			ref := "example.com/test:latest"
+			c.transferrer = &pullTestTransferrer{transfer: func(ctx context.Context, _, destination any, _ ...transfer.Opt) error {
+				_, err := destination.(transfer.ImageStorer).Store(ctx, manifest.Descriptor, c.images)
+				require.NoError(t, err)
+				if mutation == "delete" {
+					return c.images.Delete(ctx, ref)
+				}
+				_, err = c.images.Update(ctx, ctrdimages.Image{Name: ref, Target: otherManifest.Descriptor}, "target")
+				return err
+			}}
+			image, _, err := c.pullImageWithTransferService(ctx, ref, ref, nil, "native", nil, nil, time.Minute)
+			require.NoError(t, err)
+			require.Equal(t, manifest.Descriptor.Digest, image.Target().Digest)
+			actual, err := image.Config(ctx)
+			require.NoError(t, err)
+			require.Equal(t, config.Descriptor.Digest, actual.Digest)
+		})
+	}
 }
 
 func TestImageEventExternalMutation(t *testing.T) {
@@ -1289,6 +1347,7 @@ type pullTestClient struct {
 	getImage             func(context.Context, string) (containerd.Image, error)
 	pull                 func(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
 	getImageWithPlatform func(context.Context, string, platforms.MatchComparer) (containerd.Image, error)
+	imageFromRecord      func(ctrdimages.Image, platforms.MatchComparer) containerd.Image
 }
 
 func (c *pullTestClient) ListImages(ctx context.Context, filters ...string) ([]containerd.Image, error) {
@@ -1307,6 +1366,10 @@ func (c *pullTestClient) GetImage(ctx context.Context, ref string) (containerd.I
 
 func (c *pullTestClient) GetImageWithPlatform(ctx context.Context, ref string, platform platforms.MatchComparer) (containerd.Image, error) {
 	return c.getImageWithPlatform(ctx, ref, platform)
+}
+
+func (c *pullTestClient) ImageFromRecord(image ctrdimages.Image, platform platforms.MatchComparer) containerd.Image {
+	return c.imageFromRecord(image, platform)
 }
 
 func (c *pullTestClient) Pull(ctx context.Context, ref string, opts ...containerd.RemoteOpt) (containerd.Image, error) {

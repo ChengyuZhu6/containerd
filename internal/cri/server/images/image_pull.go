@@ -183,10 +183,17 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	if err != nil {
 		return "", err
 	}
-	defer release(context.WithoutCancel(ctx))
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := release(cleanupCtx); err != nil {
+			log.G(ctx).WithError(err).Warn("Failed to release image pull lease")
+		}
+	}()
 	labels := c.getLabels(ctx, ref)
-	if runtime.Name != c.defaultRuntimeName {
-		labels[crilabels.ImageRuntimeHandlerLabelKey] = runtime.Name
+	handlerName := runtime.Name
+	if handlerName == c.defaultRuntimeName {
+		handlerName = ""
 	}
 
 	// If UseLocalImagePull is true, use client.Pull to pull the image, else use transfer service by default.
@@ -219,9 +226,9 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		bytesPulled uint64
 	)
 	if useLocalPull {
-		image, bytesPulled, err = c.pullImageWithLocalPull(ctx, ref, credentials, snapshotter, platform, labels, imagePullProgressTimeout)
+		image, bytesPulled, err = c.pullImageWithLocalPull(ctx, ref, imagestore.Name(ref, handlerName), credentials, snapshotter, platform, labels, imagePullProgressTimeout)
 	} else {
-		image, bytesPulled, err = c.pullImageWithTransferService(ctx, ref, credentials, snapshotter, platform, labels, imagePullProgressTimeout)
+		image, bytesPulled, err = c.pullImageWithTransferService(ctx, ref, imagestore.Name(ref, handlerName), credentials, snapshotter, platform, labels, imagePullProgressTimeout)
 	}
 
 	if err != nil {
@@ -248,7 +255,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		if r == "" {
 			continue
 		}
-		r = imagestore.Name(r, labels[crilabels.ImageRuntimeHandlerLabelKey])
+		r = imagestore.Name(r, handlerName)
 		if err := c.createOrUpdateImageReference(ctx, r, image.Target(), labels); err != nil {
 			return "", fmt.Errorf("failed to create image reference %q: %w", r, err)
 		}
@@ -292,7 +299,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 // HTTP request.
 func (c *CRIImageService) pullImageWithLocalPull(
 	ctx context.Context,
-	ref string,
+	ref, imageName string,
 	credentials func(string) (string, string, error),
 	snapshotter string,
 	platform *imagespec.Platform,
@@ -313,7 +320,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 		containerd.WithPullSnapshotter(snapshotter),
 		containerd.WithPullUnpack,
 		containerd.WithPullLabels(labels),
-		containerd.WithPullImageName(imagestore.Name(ref, labels[crilabels.ImageRuntimeHandlerLabelKey])),
+		containerd.WithPullImageName(imageName),
 		containerd.WithDownloadLimiter(c.downloadLimiter),
 		containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
 		containerd.WithConcurrentLayerFetchBuffer(c.config.ConcurrentLayerFetchBuffer),
@@ -349,6 +356,21 @@ func (c *CRIImageService) pullImageWithLocalPull(
 	return image, bytesPulled, nil
 }
 
+type transferImageStore = transferimage.Store
+
+type pullImageStore struct {
+	*transferImageStore
+	images []containerdimages.Image
+}
+
+func (s *pullImageStore) Store(ctx context.Context, desc imagespec.Descriptor, store containerdimages.Store) ([]containerdimages.Image, error) {
+	stored, err := s.transferImageStore.Store(ctx, desc, store)
+	if err == nil {
+		s.images = stored
+	}
+	return stored, err
+}
+
 // pullImageWithTransferService handles image pulling using the transfer service.
 //
 // The returned bytesPulled is the number of bytes actually fetched from the
@@ -356,7 +378,7 @@ func (c *CRIImageService) pullImageWithLocalPull(
 // "already exists" event that does not increment the counter.
 func (c *CRIImageService) pullImageWithTransferService(
 	ctx context.Context,
-	ref string,
+	ref, imageName string,
 	credentials func(string) (string, string, error),
 	snapshotter string,
 	platform *imagespec.Platform,
@@ -379,8 +401,7 @@ func (c *CRIImageService) pullImageWithTransferService(
 		transferimage.WithImageLabels(labels),
 	}
 
-	imageName := imagestore.Name(ref, labels[crilabels.ImageRuntimeHandlerLabelKey])
-	is := transferimage.NewStore(imageName, sopts...)
+	is := &pullImageStore{transferImageStore: transferimage.NewStore(imageName, sopts...)}
 
 	log.G(ctx).Debugf("Getting new CRI credentials")
 
@@ -404,18 +425,17 @@ func (c *CRIImageService) pullImageWithTransferService(
 		return nil, 0, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
 	}
 
-	// Image should be pulled, unpacked and present in containerd image store at this moment
-	var image containerd.Image
+	var matcher platforms.MatchComparer
 	if platform != nil {
-		image, err = c.client.GetImageWithPlatform(ctx, imageName, platforms.Only(*platform))
-	} else {
-		image, err = c.client.GetImage(ctx, imageName)
+		matcher = platforms.Only(*platform)
 	}
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get image %q from containerd image store: %w", ref, err)
+	for _, stored := range is.images {
+		if stored.Name == imageName {
+			_, bytesPulled, _ := transferProgressReporter.reqReporter.status()
+			return c.client.ImageFromRecord(stored, matcher), bytesPulled, nil
+		}
 	}
-	_, bytesPulled, _ := transferProgressReporter.reqReporter.status()
-	return image, bytesPulled, nil
+	return nil, 0, fmt.Errorf("transfer did not return image %q", imageName)
 }
 
 // ParseAuth parses AuthConfig and returns username and password/secret required by containerd.
@@ -494,9 +514,6 @@ func (c *CRIImageService) createOrUpdateImageReference(ctx context.Context, name
 	if oldImg.Labels[crilabels.ImagePlatformLabelKey] != labels[crilabels.ImagePlatformLabelKey] {
 		fieldpaths = append(fieldpaths, "labels."+crilabels.ImagePlatformLabelKey)
 	}
-	if oldImg.Labels[crilabels.ImageRuntimeHandlerLabelKey] != labels[crilabels.ImageRuntimeHandlerLabelKey] {
-		fieldpaths = append(fieldpaths, "labels."+crilabels.ImageRuntimeHandlerLabelKey)
-	}
 	if oldImg.Target.Digest == img.Target.Digest && len(fieldpaths) < 2 {
 		return nil
 	}
@@ -553,11 +570,8 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 		return fmt.Errorf("get image by reference: %w", err)
 	}
 	criLabels := c.getLabels(ctx, ref)
-	if handler != "" {
-		criLabels[crilabels.ImageRuntimeHandlerLabelKey] = handler
-	}
 	var fields []string
-	for _, key := range []string{crilabels.ImageLabelKey, crilabels.ImageRuntimeHandlerLabelKey, crilabels.PinnedImageLabelKey} {
+	for _, key := range []string{crilabels.ImageLabelKey, crilabels.PinnedImageLabelKey} {
 		if value, ok := criLabels[key]; ok && img.Labels[key] != value {
 			fields = append(fields, "labels."+key)
 		}

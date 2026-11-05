@@ -48,6 +48,7 @@ type imageClient interface {
 	ListImages(context.Context, ...string) ([]containerd.Image, error)
 	GetImage(context.Context, string) (containerd.Image, error)
 	GetImageWithPlatform(context.Context, string, platforms.MatchComparer) (containerd.Image, error)
+	ImageFromRecord(images.Image, platforms.MatchComparer) containerd.Image
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
 	WithLease(context.Context, ...leases.Opt) (context.Context, func(context.Context) error, error)
 }
@@ -62,6 +63,13 @@ func (c *platformImageClient) GetImageWithPlatform(ctx context.Context, ref stri
 		return nil, err
 	}
 	return containerd.NewImageWithPlatform(c.Client, i, platform), nil
+}
+
+func (c *platformImageClient) ImageFromRecord(image images.Image, platform platforms.MatchComparer) containerd.Image {
+	if platform == nil {
+		return containerd.NewImage(c.Client, image)
+	}
+	return containerd.NewImageWithPlatform(c.Client, image, platform)
 }
 
 type ImagePlatform struct {
