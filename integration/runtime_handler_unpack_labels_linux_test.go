@@ -301,6 +301,11 @@ func TestImagePlatformConsumption(t *testing.T) {
 					cn, err := rSvc.CreateContainer(sb, config, sbConfig)
 					require.NoError(t, err)
 					require.NoError(t, rSvc.StartContainer(cn))
+					status, err := rSvc.ContainerStatus(cn)
+					require.NoError(t, err)
+					require.Len(t, status.Mounts, 2)
+					assert.Equal(t, selectedID.String(), status.Mounts[0].Image.GetImage())
+					assert.Equal(t, hostConfig.Digest.String(), status.Mounts[1].Image.GetImage())
 					for path, expected := range map[string]string{
 						"/selected-image/pr1-platform": platforms.Format(selectedPlatform),
 						"/host-image/pr1-platform":     platforms.Format(platforms.DefaultSpec()),

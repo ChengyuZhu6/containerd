@@ -90,6 +90,7 @@ func (c *criService) mutateImageMount(
 	if err != nil {
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
+	imageSpec.Image = image.ID
 	imageSpec.RuntimeHandler = image.RuntimeHandler
 	imageID := digest.Digest(image.ID).Encoded()
 
