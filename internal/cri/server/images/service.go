@@ -88,7 +88,8 @@ type CRIImageService struct {
 	// imageStore stores all resources associated with images.
 	imageStore *imagestore.Store
 	// snapshotStore stores information of all snapshots.
-	snapshotStore *snapshotstore.Store
+	snapshotStore   *snapshotstore.Store
+	snapshotsSyncer *snapshotsSyncer
 	// transferrer is used to pull image with transfer service
 	transferrer transfer.Transferrer
 	// unpackDuplicationSuppressor is used to make sure that there is only
@@ -154,12 +155,18 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 	}
 
 	log.L.Info("Start snapshots syncer")
-	snapshotsSyncer := newSnapshotsSyncer(
+	svc.snapshotsSyncer = newSnapshotsSyncer(
 		svc.snapshotStore,
 		options.Snapshotters,
 		time.Duration(svc.config.StatsCollectPeriod)*time.Second,
 	)
-	snapshotsSyncer.start()
+	svc.snapshotsSyncer.enable(config.Snapshotter)
+	for _, p := range svc.runtimePlatforms {
+		if p != nil {
+			svc.snapshotsSyncer.enable(p.Snapshotter)
+		}
+	}
+	svc.snapshotsSyncer.start()
 
 	return &svc, nil
 }
@@ -175,11 +182,19 @@ func (c *CRIImageService) UpdateRuntime(runtimeName string, imagePlatform *Image
 			existing.Snapshotter = imagePlatform.Snapshotter
 		}
 		log.L.Debugf("Runtime %q already configured, preserving image settings", runtimeName)
-		return
+	} else {
+		c.runtimePlatforms[runtimeName] = imagePlatform
+		if imagePlatform != nil {
+			log.L.Infof("Registered runtime %q with snapshotter %q", runtimeName, imagePlatform.Snapshotter)
+		}
 	}
-	c.runtimePlatforms[runtimeName] = imagePlatform
-	if imagePlatform != nil {
-		log.L.Infof("Registered runtime %q with snapshotter %q", runtimeName, imagePlatform.Snapshotter)
+	if c.snapshotsSyncer != nil {
+		if imagePlatform != nil {
+			c.snapshotsSyncer.enable(imagePlatform.Snapshotter)
+		}
+		if p := c.runtimePlatforms[runtimeName]; p != nil {
+			c.snapshotsSyncer.enable(p.Snapshotter)
+		}
 	}
 }
 
