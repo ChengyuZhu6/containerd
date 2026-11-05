@@ -89,10 +89,11 @@ func (c *criService) mutateImageMount(
 	if ref == "" {
 		return fmt.Errorf("image not specified in: %+v", imageSpec)
 	}
-	image, err := c.LocalResolve(ref, runtimeHandler)
+	image, err := c.resolveContainerImage(imageSpec, runtimeHandler)
 	if err != nil {
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
+	imageSpec.RuntimeHandler = image.RuntimeHandler
 	containerdImage, imageDigest, err := c.toContainerdImage(ctx, image)
 	if err != nil {
 		return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)

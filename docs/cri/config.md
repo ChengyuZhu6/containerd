@@ -51,11 +51,12 @@ The associations are restored after a containerd restart. Recovered legacy conta
 without an image handler are reported as using the default-handler image association.
 
 Kubernetes clients must pass the appropriate image handler for non-default workloads,
-including image status and removal. Older kubelets, or kubelets with
-`RuntimeClassInImageCriApi` disabled, do not provide this lifecycle contract: non-default
-images must be explicitly registered before use, and empty-handler image GC cannot
-remove non-default variants. Enabling this containerd behavior does not by itself enable
-the Kubernetes feature gate or complete kubelet GC integration.
+including container creation, image status and removal. Explicit image handlers must
+match the sandbox runtime. For older clients that omit the handler during container or
+image-volume creation, CRI first uses the sandbox's association and otherwise falls back
+to the default-handler image, retaining legacy shared-image behavior. Empty-handler image
+GC cannot remove non-default variants. Enabling this containerd behavior does not by itself
+enable the Kubernetes feature gate or complete kubelet GC integration.
 
 ### Cgroup Driver
 While containerd and Kubernetes use the legacy `cgroupfs` driver for managing cgroups by default,

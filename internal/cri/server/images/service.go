@@ -27,6 +27,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/transfer"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
@@ -48,6 +49,7 @@ type imageClient interface {
 	GetImage(context.Context, string) (containerd.Image, error)
 	GetImageWithPlatform(context.Context, string, platforms.MatchComparer) (containerd.Image, error)
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
+	WithLease(context.Context, ...leases.Opt) (context.Context, func(context.Context) error, error)
 }
 
 type platformImageClient struct {

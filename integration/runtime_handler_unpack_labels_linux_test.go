@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,6 +290,188 @@ func TestImagePlatformConsumption(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandlerPullIsolation(t *testing.T) {
+	for _, local := range []bool{true, false} {
+		t.Run(fmt.Sprintf("local=%t", local), func(t *testing.T) {
+			entered, release := make(chan struct{}, 1), make(chan struct{})
+			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				select {
+				case <-release:
+					w.WriteHeader(http.StatusServiceUnavailable)
+				case <-r.Context().Done():
+				}
+			}))
+			defer registry.Close()
+			defer close(release)
+			host := strings.TrimPrefix(registry.URL, "http://")
+			workDir := t.TempDir()
+			cfgPath := filepath.Join(workDir, "config.toml")
+			hostsDir := filepath.Join(workDir, "hosts")
+			require.NoError(t, os.MkdirAll(filepath.Join(hostsDir, host), 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(hostsDir, host, "hosts.toml"), []byte(fmt.Sprintf("server = %q\n", registry.URL)), 0600))
+			require.NoError(t, os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
+version = 3
+[plugins.'io.containerd.cri.v1.images']
+  use_local_image_pull = %t
+[plugins.'io.containerd.cri.v1.images'.registry]
+  config_path = %q
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.a]
+  runtime_type = "io.containerd.runc.v2"
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.b]
+  runtime_type = "io.containerd.runc.v2"
+`, local, hostsDir)), 0600))
+			proc := newCtrdProc(t, *containerdBin, workDir, []string{"--config", cfgPath})
+			require.NoError(t, proc.isReady())
+			t.Cleanup(func() {
+				assert.NoError(t, proc.kill(syscall.SIGTERM))
+				assert.NoError(t, proc.wait(time.Minute))
+				if t.Failed() {
+					dumpFileContent(t, proc.logPath())
+				}
+			})
+			conn, err := grpc.NewClient("unix://"+proc.grpcAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			defer conn.Close()
+			service := criruntime.NewImageServiceClient(conn)
+			ctx := context.Background()
+			ref := images.Get(images.BusyBox)
+			for _, handler := range []string{"a", "b"} {
+				_, err := service.PullImage(ctx, &criruntime.PullImageRequest{
+					Image: &criruntime.ImageSpec{Image: ref, RuntimeHandler: handler},
+				})
+				require.NoError(t, err)
+			}
+			slowCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			finished := make(chan error, 1)
+			go func() {
+				_, err := service.PullImage(slowCtx, &criruntime.PullImageRequest{
+					Image: &criruntime.ImageSpec{Image: host + "/stalled:latest", RuntimeHandler: "a"},
+				})
+				finished <- err
+			}()
+			select {
+			case <-entered:
+			case err := <-finished:
+				t.Fatalf("pull failed before contacting the registry: %v", err)
+			case <-time.After(30 * time.Second):
+				t.Fatal("pull did not contact the registry")
+			}
+			t.Run("same-handler-pull", func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				_, err := service.PullImage(ctx, &criruntime.PullImageRequest{
+					Image: &criruntime.ImageSpec{Image: ref, RuntimeHandler: "a"},
+				})
+				require.NoError(t, err)
+			})
+			t.Run("other-handler-remove", func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				_, err := service.RemoveImage(ctx, &criruntime.RemoveImageRequest{
+					Image: &criruntime.ImageSpec{Image: ref, RuntimeHandler: "b"},
+				})
+				require.NoError(t, err)
+				status, err := service.ImageStatus(ctx, &criruntime.ImageStatusRequest{
+					Image: &criruntime.ImageSpec{Image: ref, RuntimeHandler: "a"},
+				})
+				require.NoError(t, err)
+				require.NotNil(t, status.Image)
+			})
+			cancel()
+			select {
+			case err := <-finished:
+				require.Error(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("canceled registry pull did not return")
+			}
+			client, err := containerd.New(proc.grpcAddress(), containerd.WithDefaultNamespace(k8sNamespace))
+			require.NoError(t, err)
+			defer client.Close()
+			require.NoError(t, Eventually(func() (bool, error) {
+				leases, err := client.LeasesService().List(ctx)
+				return len(leases) == 0, err
+			}, 100*time.Millisecond, 10*time.Second))
+		})
+	}
+}
+
+func TestRuntimeHandlerLegacyConsumption(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := filepath.Join(workDir, "config.toml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
+version = 3
+[plugins.'io.containerd.cri.v1.images'.pinned_images]
+  sandbox = %q
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.a]
+  runtime_type = "io.containerd.runc.v2"
+  snapshotter = "native"
+`, images.Get(images.Pause))), 0600))
+	proc := newCtrdProc(t, *containerdBin, workDir, []string{"--config", cfgPath})
+	require.NoError(t, proc.isReady())
+	rSvc, iSvc := proc.criRuntimeService(t), proc.criImageService(t)
+	t.Cleanup(func() {
+		cleanupPods(t, rSvc)
+		assert.NoError(t, proc.kill(syscall.SIGTERM))
+		assert.NoError(t, proc.wait(time.Minute))
+		if t.Failed() {
+			dumpFileContent(t, proc.logPath())
+		}
+	})
+	ref := images.Get(images.BusyBox)
+	id, err := iSvc.PullImage(&criruntime.ImageSpec{Image: ref}, nil, nil, "")
+	require.NoError(t, err)
+	volume := images.Get(images.Alpine)
+	_, err = iSvc.PullImage(&criruntime.ImageSpec{Image: volume}, nil, nil, "")
+	require.NoError(t, err)
+	pod := PodSandboxConfig("legacy", "handler-images", WithHostNetwork)
+	sandbox, err := rSvc.RunPodSandbox(pod, "a")
+	require.NoError(t, err)
+	for _, explicit := range []bool{true, false} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			cfg := ContainerConfig(fmt.Sprintf("root-%t", explicit), id, WithCommand("sleep", "300"))
+			if explicit {
+				cfg.Image.RuntimeHandler = "a"
+				_, err := rSvc.CreateContainer(sandbox, cfg, pod)
+				require.Error(t, err)
+				return
+			}
+			container, err := rSvc.CreateContainer(sandbox, cfg, pod)
+			require.NoError(t, err)
+			require.NoError(t, rSvc.StartContainer(container))
+			status, err := rSvc.ContainerStatus(container)
+			require.NoError(t, err)
+			require.Equal(t, "runc", status.Image.GetRuntimeHandler())
+			for _, volumeHandler := range []string{"a", ""} {
+				cfg = ContainerConfig("volume-"+volumeHandler, id, WithCommand("sleep", "300"))
+				cfg.Mounts = []*criruntime.Mount{{ContainerPath: "/image-volume", Readonly: true,
+					Image: &criruntime.ImageSpec{Image: volume, RuntimeHandler: volumeHandler}}}
+				container, err = rSvc.CreateContainer(sandbox, cfg, pod)
+				if volumeHandler != "" {
+					require.Error(t, err)
+					continue
+				}
+				require.NoError(t, err)
+				require.NoError(t, rSvc.StartContainer(container))
+				stdout, stderr, err := rSvc.ExecSync(container, []string{"cat", "/image-volume/etc/alpine-release"}, time.Minute)
+				require.NoError(t, err, string(stderr))
+				require.Contains(t, string(stdout), "3.14")
+			}
+			_, err = iSvc.PullImage(&criruntime.ImageSpec{Image: volume}, nil, nil, "a")
+			require.NoError(t, err)
+			cfg.Metadata.Name = "registered-volume"
+			cfg.Mounts[0].Image.RuntimeHandler = "a"
+			container, err = rSvc.CreateContainer(sandbox, cfg, pod)
+			require.NoError(t, err)
+			require.NoError(t, rSvc.StartContainer(container))
+		})
+	}
+}
+
 func TestRuntimeHandlerImageLifecycle(t *testing.T) {
 	pauseRef := images.Get(images.Pause)
 	_, err := imageService.PullImage(&criruntime.ImageSpec{Image: pauseRef}, nil, nil, "")
@@ -356,6 +540,7 @@ func TestRuntimeHandlerImageLifecycle(t *testing.T) {
 				containers := make(map[string]string)
 				create := func(handler, name string) string {
 					cfg := ContainerConfig(name, id, WithCommand("sleep", "300"))
+					cfg.Image.RuntimeHandler = handler
 					cn, err := rSvc.CreateContainer(sandboxes[handler], cfg, pods[handler])
 					require.NoError(t, err)
 					require.NoError(t, rSvc.StartContainer(cn))

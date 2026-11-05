@@ -179,12 +179,11 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
 	)
-	c.imageLifecycleMutex.RLock()
-	defer c.imageLifecycleMutex.RUnlock()
-	if err := c.imageMutationLocker.Lock(ctx, runtime.Name); err != nil {
+	ctx, release, err := c.client.WithLease(ctx)
+	if err != nil {
 		return "", err
 	}
-	defer c.imageMutationLocker.Unlock(runtime.Name)
+	defer release(context.WithoutCancel(ctx))
 	labels := c.getLabels(ctx, ref)
 	if runtime.Name != c.defaultRuntimeName {
 		labels[crilabels.ImageRuntimeHandlerLabelKey] = runtime.Name
@@ -238,6 +237,12 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	imageID := configDesc.Digest.String()
 	span.SetAttributes(tracing.Attribute("image.id", imageID))
 
+	c.imageLifecycleMutex.RLock()
+	defer c.imageLifecycleMutex.RUnlock()
+	if err := c.imageMutationLocker.Lock(ctx, runtime.Name); err != nil {
+		return "", err
+	}
+	defer c.imageMutationLocker.Unlock(runtime.Name)
 	repoDigest, repoTag := util.GetRepoDigestAndTag(namedRef, image.Target().Digest)
 	for _, r := range []string{imageID, repoTag, repoDigest} {
 		if r == "" {

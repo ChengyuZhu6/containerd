@@ -134,7 +134,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}
-	image, err := c.LocalResolve(config.GetImage().GetImage(), runtimeHandler)
+	image, err := c.resolveContainerImage(config.GetImage(), runtimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve image %q: %w", config.GetImage().GetImage(), err)
 	}
@@ -161,7 +161,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			containerConfig:       config,
 			imageConfig:           &image.ImageSpec.Config,
 			podSandboxConfig:      sandboxConfig,
-			sandboxRuntimeHandler: sandbox.Metadata.RuntimeHandler,
+			sandboxRuntimeHandler: runtimeHandler,
 			sandboxPid:            sandboxPid,
 			NetNSPath:             sandbox.NetNSPath,
 			containerName:         containerName,
@@ -248,7 +248,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	}
 
 	// mutate the extra CRI volume mounts from the runtime spec to properly specify the OCI image volume mount requests as bind mounts for this container
-	err = c.mutateMounts(r.ctx, r.containerConfig.GetMounts(), c.RuntimeSnapshotter(r.ctx, ociRuntime), r.sandboxID, r.containerConfig.GetImage().GetRuntimeHandler(), platform)
+	err = c.mutateMounts(r.ctx, r.containerConfig.GetMounts(), c.RuntimeSnapshotter(r.ctx, ociRuntime), r.sandboxID, r.sandboxRuntimeHandler, platform)
 	if err != nil {
 		return "", fmt.Errorf("failed to mount image volume: %w", err)
 	}

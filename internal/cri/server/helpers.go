@@ -167,6 +167,20 @@ func criContainerStateToString(state runtime.ContainerState) string {
 	return runtime.ContainerState_name[int32(state)]
 }
 
+func (c *criService) resolveContainerImage(spec *runtime.ImageSpec, runtimeHandler string) (imagestore.Image, error) {
+	if runtimeHandler == "" {
+		runtimeHandler = c.config.DefaultRuntimeName
+	}
+	if handler := spec.GetRuntimeHandler(); handler != "" && handler != runtimeHandler {
+		return imagestore.Image{}, fmt.Errorf("image runtime handler %q does not match sandbox runtime handler %q: %w", handler, runtimeHandler, errdefs.ErrInvalidArgument)
+	}
+	image, err := c.LocalResolve(spec.GetImage(), runtimeHandler)
+	if errdefs.IsNotFound(err) && spec.GetRuntimeHandler() == "" {
+		return c.LocalResolve(spec.GetImage(), "")
+	}
+	return image, err
+}
+
 // toContainerdImage converts an image object in image store to containerd image handler.
 func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, string, error) {
 	if len(image.References) == 0 {

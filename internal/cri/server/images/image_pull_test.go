@@ -37,6 +37,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	ctrdimages "github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/imagetest"
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/metadata"
 	"github.com/containerd/containerd/v2/core/transfer"
 	transferimage "github.com/containerd/containerd/v2/core/transfer/image"
@@ -1310,6 +1311,10 @@ func (c *pullTestClient) GetImageWithPlatform(ctx context.Context, ref string, p
 
 func (c *pullTestClient) Pull(ctx context.Context, ref string, opts ...containerd.RemoteOpt) (containerd.Image, error) {
 	return c.pull(ctx, ref, opts...)
+}
+
+func (c *pullTestClient) WithLease(ctx context.Context, _ ...leases.Opt) (context.Context, func(context.Context) error, error) {
+	return ctx, func(context.Context) error { return nil }, nil
 }
 
 type pullTestTransferrer struct {
