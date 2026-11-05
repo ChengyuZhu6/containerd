@@ -157,7 +157,10 @@ func TestImageVolumeBasic(t *testing.T) {
 			volumeImg, err := containerdClient.GetImage(ctx, tc.imageVolumeImage)
 			require.NoError(t, err)
 
-			volumeImgTarget := filepath.Join(podCtx.imageVolumeDir(), volumeImg.Target().Digest.Encoded())
+			volumeConfig, err := volumeImg.Config(ctx)
+			require.NoError(t, err)
+
+			volumeImgTarget := filepath.Join(podCtx.imageVolumeDir(), volumeConfig.Digest.Encoded())
 			_, err = snSrv.Mounts(ctx, volumeImgTarget)
 			require.NoError(t, err)
 
@@ -201,7 +204,10 @@ func TestImageVolumeReusableAfterFailure(t *testing.T) {
 	podCtx := newPodTCtx(t, runtimeService, t.Name(), "image-volume")
 	defer podCtx.stop(true)
 
-	target := filepath.Join(podCtx.imageVolumeDir(), img.Target().Digest.Encoded())
+	imageConfig, err := img.Config(ctx)
+	require.NoError(t, err)
+
+	target := filepath.Join(podCtx.imageVolumeDir(), imageConfig.Digest.Encoded())
 
 	cfg := ContainerConfig("invalid-image-subpath", image,
 		WithImageVolumeMount(image, "does-not-exist", "/image-mount"))
@@ -296,8 +302,11 @@ func TestImageVolumeSetupIfContainerdRestarts(t *testing.T) {
 	diffIDs, err := img.RootFS(ctx)
 	require.NoError(t, err)
 
+	imageConfig, err := img.Config(ctx)
+	require.NoError(t, err)
+
 	alpineImageChainID := identity.ChainID(diffIDs).String()
-	alpineImageTarget := img.Target().Digest.Encoded()
+	alpineImageTarget := imageConfig.Digest.Encoded()
 
 	snSrv := containerdClient.SnapshotService("overlayfs")
 	for _, tc := range []struct {

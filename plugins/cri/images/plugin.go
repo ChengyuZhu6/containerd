@@ -117,11 +117,10 @@ func init() {
 
 			allSnapshotters := mdb.Snapshotters()
 			defaultSnapshotter := config.Snapshotter
-			if s, ok := allSnapshotters[defaultSnapshotter]; ok {
-				options.Snapshotters[defaultSnapshotter] = s
-			} else {
+			if _, ok := allSnapshotters[defaultSnapshotter]; !ok {
 				return nil, fmt.Errorf("failed to find snapshotter %q", defaultSnapshotter)
 			}
+			options.Snapshotters = allSnapshotters
 
 			snapshotRoot := func(snapshotter string) (snapshotRoot string) {
 				if plugin := ic.Plugins().Get(plugins.SnapshotPlugin, snapshotter); plugin != nil {
@@ -134,17 +133,12 @@ func init() {
 				return snapshotRoot
 			}
 
-			options.ImageFSPaths[defaultSnapshotter] = snapshotRoot(defaultSnapshotter)
-			log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[defaultSnapshotter], defaultSnapshotter)
+			for name := range allSnapshotters {
+				options.ImageFSPaths[name] = snapshotRoot(name)
+				log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[name], name)
+			}
 
 			for runtimeName, rp := range config.RuntimePlatforms {
-				if rp.Snapshotter != "" {
-					if _, ok := options.ImageFSPaths[rp.Snapshotter]; !ok {
-						options.ImageFSPaths[rp.Snapshotter] = snapshotRoot(rp.Snapshotter)
-						log.L.Infof("Get image filesystem path %q for snapshotter %q", options.ImageFSPaths[rp.Snapshotter], rp.Snapshotter)
-					}
-				}
-
 				// Left unset when runtime_platforms doesn't configure a platform.
 				var platform *imagespec.Platform
 				if rp.Platform != "" {

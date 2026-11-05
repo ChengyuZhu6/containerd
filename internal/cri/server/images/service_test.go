@@ -18,12 +18,15 @@ package images
 
 import (
 	"context"
+	"sync"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/snapshots"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	snapshotstore "github.com/containerd/containerd/v2/internal/cri/store/snapshot"
 	"github.com/containerd/containerd/v2/internal/kmutex"
+	"github.com/containerd/containerd/v2/plugins/snapshots/native"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/stretchr/testify/assert"
@@ -59,13 +62,46 @@ var testImageConfig = criconfig.ImageConfig{
 
 func TestUpdateRuntimeMergesSnapshotter(t *testing.T) {
 	c, _ := newTestCRIService()
+	sn, err := native.NewSnapshotter(t.TempDir())
+	if !assert.NoError(t, err) {
+		return
+	}
+	t.Cleanup(func() { assert.NoError(t, sn.Close()) })
+	_, err = sn.Prepare(context.Background(), "stats", "")
+	if !assert.NoError(t, err) {
+		return
+	}
+	c.snapshotsSyncer = newSnapshotsSyncer(c.snapshotStore, map[string]snapshots.Snapshotter{
+		"native": sn, "overlayfs": sn, "unused": nil,
+	}, 0)
 	c.runtimePlatforms["runtime"] = &ImagePlatform{}
 	c.UpdateRuntime("runtime", &ImagePlatform{Snapshotter: "native"})
 	assert.Equal(t, "native", c.runtimePlatforms["runtime"].Snapshotter)
+	assert.Len(t, c.snapshotsSyncer.enabled, 1)
+	assert.Contains(t, c.snapshotsSyncer.enabled, "native")
 
+	c.snapshotsSyncer.enabled = make(map[string]snapshots.Snapshotter)
 	c.runtimePlatforms["runtime"] = &ImagePlatform{Snapshotter: "overlayfs"}
 	c.UpdateRuntime("runtime", &ImagePlatform{Snapshotter: "native"})
 	assert.Equal(t, "overlayfs", c.runtimePlatforms["runtime"].Snapshotter)
+	assert.Len(t, c.snapshotsSyncer.enabled, 2)
+	assert.Contains(t, c.snapshotsSyncer.enabled, "native")
+	c.UpdateRuntime("new", &ImagePlatform{Snapshotter: "native"})
+	c.UpdateRuntime("default", nil)
+	assert.Len(t, c.snapshotsSyncer.enabled, 2)
+	assert.Contains(t, c.snapshotsSyncer.enabled, "overlayfs")
+	assert.NotContains(t, c.snapshotsSyncer.enabled, "unused")
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 100 {
+			assert.NoError(t, c.snapshotsSyncer.sync())
+		}
+	})
+	for range 100 {
+		c.UpdateRuntime("runtime", &ImagePlatform{Snapshotter: "native"})
+	}
+	wg.Wait()
 }
 
 func TestLocalResolve(t *testing.T) {
