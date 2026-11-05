@@ -256,20 +256,45 @@ func TestImagePlatformConsumption(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, selectedChain, snapshot.Parent)
 			} else {
-				config := ContainerConfig("platform", source, WithCommand("sleep", "300"),
-					WithImageVolumeMount(source, "", "/selected-image"))
-				cn, err := rSvc.CreateContainer(sb, config, sbConfig)
-				require.NoError(t, err)
-				require.NoError(t, rSvc.StartContainer(cn))
-				stdout, stderr, err := rSvc.ExecSync(cn, []string{"cat", "/pr1-platform"}, time.Minute)
-				require.NoError(t, err, string(stderr))
-				assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
-				stdout, stderr, err = rSvc.ExecSync(cn, []string{"cat", "/selected-image/pr1-platform"}, time.Minute)
-				require.NoError(t, err, string(stderr))
-				assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
-				status, err := rSvc.ContainerStatus(cn)
-				require.NoError(t, err)
-				assert.Equal(t, selectedID.String(), status.ImageRef)
+				t.Run("single-platform", func(t *testing.T) {
+					config := ContainerConfig("platform", source, WithCommand("sleep", "300"), WithImageVolumeMount(source, "", "/selected-image"))
+					cn, err := rSvc.CreateContainer(sb, config, sbConfig)
+					require.NoError(t, err)
+					require.NoError(t, rSvc.StartContainer(cn))
+					for _, path := range []string{"/pr1-platform", "/selected-image/pr1-platform"} {
+						stdout, stderr, err := rSvc.ExecSync(cn, []string{"cat", path}, time.Minute)
+						require.NoError(t, err, string(stderr))
+						assert.Equal(t, platforms.Format(selectedPlatform), string(stdout))
+					}
+					status, err := rSvc.ContainerStatus(cn)
+					require.NoError(t, err)
+					assert.Equal(t, selectedID.String(), status.ImageRef)
+				})
+				t.Run("two-platform-volumes", func(t *testing.T) {
+					hostRef := source + "-host-platform"
+					hostConfig, err := coreimages.Config(ctx, cs, img.Target, platforms.Default())
+					require.NoError(t, err)
+					_, err = client.ImageService().Create(ctx, coreimages.Image{Name: hostRef, Target: img.Target,
+						Labels: map[string]string{labels.ImagePlatformLabelKey: platforms.Format(platforms.DefaultSpec())}})
+					require.NoError(t, err)
+					require.NoError(t, Eventually(func() (bool, error) {
+						image, err := iSvc.ImageStatus(&criruntime.ImageSpec{Image: hostRef})
+						return image != nil && image.Id == hostConfig.Digest.String(), err
+					}, 100*time.Millisecond, 10*time.Second))
+					config := ContainerConfig("two-platforms", source, WithCommand("sleep", "300"),
+						WithImageVolumeMount(source, "", "/selected-image"), WithImageVolumeMount(hostRef, "", "/host-image"))
+					cn, err := rSvc.CreateContainer(sb, config, sbConfig)
+					require.NoError(t, err)
+					require.NoError(t, rSvc.StartContainer(cn))
+					for path, expected := range map[string]string{
+						"/selected-image/pr1-platform": platforms.Format(selectedPlatform),
+						"/host-image/pr1-platform":     platforms.Format(platforms.DefaultSpec()),
+					} {
+						stdout, stderr, err := rSvc.ExecSync(cn, []string{"cat", path}, time.Minute)
+						require.NoError(t, err, string(stderr))
+						assert.Equal(t, expected, string(stdout))
+					}
+				})
 			}
 			require.NoError(t, rSvc.StopPodSandbox(sb))
 			require.NoError(t, rSvc.RemovePodSandbox(sb))
