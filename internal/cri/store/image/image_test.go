@@ -317,6 +317,37 @@ func TestImageStore(t *testing.T) {
 	}
 }
 
+func TestImageStoreReferenceCase(t *testing.T) {
+	id := "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, handler := range []string{"", "runc"} {
+		t.Run(handler, func(t *testing.T) {
+			removed, retained := "x.io/a:xG", "x.io/a:xa"
+			s, err := NewFakeStore([]Image{{ID: id, RuntimeHandler: handler, References: []string{id, removed, retained}, Pinned: true}})
+			assert := assertlib.New(t)
+			if !assert.NoError(err) {
+				return
+			}
+			before, err := s.GetForRuntime(id, handler)
+			assert.NoError(err)
+			assert.NoError(s.update(Name(removed, handler), nil))
+			after, err := s.GetForRuntime(id, handler)
+			assert.NoError(err)
+			assert.ElementsMatch([]string{Name(id, handler), Name(retained, handler)}, after.References)
+			assert.Len(before.References, 3)
+			assert.True(after.Pinned)
+			resolved, err := s.ResolveForRuntime(retained, handler)
+			assert.NoError(err)
+			assert.Equal(id, resolved)
+			_, err = s.ResolveForRuntime(removed, handler)
+			assert.ErrorIs(err, errdefs.ErrNotFound)
+			assert.NoError(s.update(Name(retained, handler), nil))
+			assert.NoError(s.update(Name(id, handler), nil))
+			_, err = s.GetForRuntime(id, handler)
+			assert.ErrorIs(err, errdefs.ErrNotFound)
+		})
+	}
+}
+
 func TestImageStoreRuntimeHandlers(t *testing.T) {
 	assert := assertlib.New(t)
 	id := "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

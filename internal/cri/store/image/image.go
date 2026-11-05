@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -478,7 +479,7 @@ func (s *store) delete(id, ref string) {
 	if !ok {
 		return
 	}
-	i.References = util.SubtractStringSlice(i.References, ref)
+	i.References = slices.DeleteFunc(slices.Clone(i.References), func(name string) bool { return name == ref })
 	if len(i.References) != 0 {
 		if refs := s.pinnedRefs[digest.String()]; refs != nil {
 			if refs.Delete(ref); len(refs) == 0 {

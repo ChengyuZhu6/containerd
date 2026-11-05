@@ -22,12 +22,11 @@ import (
 	"os"
 	"path/filepath"
 
-	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/containerd/platforms"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -94,13 +93,12 @@ func (c *criService) mutateImageMount(
 	if err != nil {
 		return fmt.Errorf("failed to resolve image %q: %w", ref, err)
 	}
-	containerdImage, err := c.toContainerdImage(ctx, image)
+	containerdImage, imageDigest, err := c.toContainerdImage(ctx, image)
 	if err != nil {
 		return fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
 	}
 
-	// This is a digest of the manifest
-	imageID := containerdImage.Target().Digest.Encoded()
+	imageID := digest.Digest(imageDigest).Encoded()
 
 	target := c.getImageVolumeHostPath(sandboxID, imageID)
 
@@ -113,12 +111,7 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to ensure %s is mounted: %w", target, err)
 	}
 	if !mounted {
-		img, err := c.client.ImageService().Get(ctx, containerdImage.Name())
-		if err != nil {
-			return fmt.Errorf("failed to get image volume ref %q: %w", ref, err)
-		}
-
-		i := containerd.NewImageWithPlatform(c.client, img, platforms.Only(platform))
+		i := containerdImage
 		if err := i.Unpack(ctx, snapshotter); err != nil {
 			return fmt.Errorf("failed to unpack image volume: %w", err)
 		}

@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/containerd/typeurl/v2"
-	"github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -36,6 +35,7 @@ import (
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
+	customopts "github.com/containerd/containerd/v2/internal/cri/opts"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/errdefs"
@@ -168,21 +168,26 @@ func criContainerStateToString(state runtime.ContainerState) string {
 }
 
 // toContainerdImage converts an image object in image store to containerd image handler.
-func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, error) {
-	// image should always have at least one reference.
+func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, string, error) {
 	if len(image.References) == 0 {
-		return nil, fmt.Errorf("invalid image with no reference %q", image.ID)
+		return nil, "", fmt.Errorf("invalid image with no reference %q", image.ID)
 	}
+	var lastErr error
 	for _, name := range image.References {
-		ref, _, err := imagestore.ParseName(name)
-		if err != nil {
-			return nil, err
+		i, err := c.client.ImageService().Get(ctx, name)
+		if err == nil {
+			var converted containerd.Image
+			converted, err = customopts.ImageForConfig(ctx, c.client, i, image.ID)
+			if err == nil {
+				return converted, i.Target.Digest.String(), nil
+			}
 		}
-		if _, err := digest.Parse(ref); err != nil {
-			return c.client.GetImage(ctx, name)
+		if !errdefs.IsNotFound(err) {
+			return nil, "", err
 		}
+		lastErr = err
 	}
-	return c.client.GetImage(ctx, image.References[0])
+	return nil, "", lastErr
 }
 
 // getUserFromImage gets uid or user name of the image user.

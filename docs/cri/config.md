@@ -23,6 +23,14 @@ For the further information, see [`../PLUGINS.md`](../PLUGINS.md).
 
 ## Basic configuration
 
+### Image platform selection
+
+CRI preserves the image config selected during resolution when consuming a multi-platform
+image. Container roots, sandbox roots, image volumes and unpack fallback use the same
+manifest, rather than selecting the host platform again. Persisted image targets and
+reported manifest/index digests are unchanged. This uses existing runtime platform and
+snapshotter settings; it does not introduce new per-RuntimeClass configuration.
+
 ### Images and runtime handlers
 
 CRI image operations use `ImageSpec.runtime_handler` to identify an image variant.

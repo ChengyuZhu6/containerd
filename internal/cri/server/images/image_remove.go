@@ -24,6 +24,7 @@ import (
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/pkg/tracing"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -50,6 +51,8 @@ func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.Im
 	if err != nil {
 		return err
 	}
+	c.imageLifecycleMutex.Lock()
+	defer c.imageLifecycleMutex.Unlock()
 	if err := c.imageMutationLocker.Lock(ctx, h.Name); err != nil {
 		return err
 	}
@@ -76,7 +79,8 @@ func (c *CRIImageService) RemoveImage(ctx context.Context, imageSpec *runtime.Im
 		}
 		matcher, err := imagePlatformFromLabels(img.Labels)
 		if err != nil {
-			return err
+			log.G(ctx).WithError(err).Warnf("Skipping image %q with invalid platform metadata", img.Name)
+			continue
 		}
 		if matcher == nil {
 			matcher = platforms.Default()

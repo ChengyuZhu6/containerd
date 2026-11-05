@@ -141,7 +141,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	config = proto.Clone(config).(*runtime.ContainerConfig)
 	config.Image.RuntimeHandler = image.RuntimeHandler
 	meta.Config = config
-	containerdImage, err := c.toContainerdImage(ctx, image)
+	containerdImage, imageDigest, err := c.toContainerdImage(ctx, image)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
 	}
@@ -157,6 +157,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 			sandbox:               &sandbox,
 			sandboxID:             sandboxID,
 			imageID:               image.ID,
+			imageDigest:           imageDigest,
 			containerConfig:       config,
 			imageConfig:           &image.ImageSpec.Config,
 			podSandboxConfig:      sandboxConfig,
@@ -182,6 +183,7 @@ type createContainerRequest struct {
 	sandbox               *sandboxstore.Sandbox
 	sandboxID             string
 	imageID               string
+	imageDigest           string
 	containerConfig       *runtime.ContainerConfig
 	imageConfig           *imagespec.ImageConfig
 	podSandboxConfig      *runtime.PodSandboxConfig
@@ -336,7 +338,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 		opts = append(opts, customopts.WithVolumes(mountMap, platform))
 	}
 	r.meta.ImageRef = r.imageID
-	r.meta.ImageDigest = (*r.containerdImage).Target().Digest.String()
+	r.meta.ImageDigest = r.imageDigest
 	r.meta.ImageName, _, err = imagestore.ParseName((*r.containerdImage).Name())
 	if err != nil {
 		return "", err

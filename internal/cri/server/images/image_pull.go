@@ -179,6 +179,8 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
 	)
+	c.imageLifecycleMutex.RLock()
+	defer c.imageLifecycleMutex.RUnlock()
 	if err := c.imageMutationLocker.Lock(ctx, runtime.Name); err != nil {
 		return "", err
 	}
@@ -532,56 +534,57 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 	if lockHandler == "" {
 		lockHandler = c.defaultRuntimeName
 	}
+	c.imageLifecycleMutex.RLock()
+	defer c.imageLifecycleMutex.RUnlock()
 	if err := c.imageMutationLocker.Lock(ctx, lockHandler); err != nil {
 		return err
 	}
 	defer c.imageMutationLocker.Unlock(lockHandler)
-	// TODO: Use image service
-	img, err := c.client.GetImage(ctx, r)
+	img, err := c.images.Get(ctx, r)
 	if err != nil {
-		if !errdefs.IsNotFound(err) {
-			return fmt.Errorf("get image by reference: %w", err)
+		if errdefs.IsNotFound(err) {
+			return c.imageStore.UpdateWithPlatform(ctx, r, nil)
 		}
-		// If the image is not found, we should continue updating the cache,
-		// so that the image can be removed from the cache.
-		if err := c.imageStore.UpdateWithPlatform(ctx, r, nil); err != nil {
-			return fmt.Errorf("update image store for %q: %w", r, err)
-		}
-		return nil
+		return fmt.Errorf("get image by reference: %w", err)
 	}
-
-	platform, err := imagePlatformFromLabels(img.Labels())
-	if err != nil {
-		return fmt.Errorf("get platform for image %q: %w", r, err)
-	}
-	if platform != nil {
-		img, err = c.client.GetImageWithPlatform(ctx, r, platform)
-		if err != nil {
-			return fmt.Errorf("get image by reference and platform: %w", err)
-		}
-	}
-
-	labels := img.Labels()
 	criLabels := c.getLabels(ctx, ref)
 	if handler != "" {
 		criLabels[crilabels.ImageRuntimeHandlerLabelKey] = handler
 	}
-	if value := labels[crilabels.ImagePlatformLabelKey]; value != "" {
-		criLabels[crilabels.ImagePlatformLabelKey] = value
+	var fields []string
+	for _, key := range []string{crilabels.ImageLabelKey, crilabels.ImageRuntimeHandlerLabelKey, crilabels.PinnedImageLabelKey} {
+		if value, ok := criLabels[key]; ok && img.Labels[key] != value {
+			fields = append(fields, "labels."+key)
+		}
 	}
-	configDesc, err := img.Config(ctx)
+	if len(fields) > 0 {
+		img, err = c.images.Update(ctx, containerdimages.Image{Name: r, Labels: criLabels}, fields...)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				return c.imageStore.UpdateWithPlatform(ctx, r, nil)
+			}
+			return fmt.Errorf("update managed labels: %w", err)
+		}
+	}
+	platform, err := imagePlatformFromLabels(img.Labels)
+	if err != nil {
+		return fmt.Errorf("get platform for image %q: %w", r, err)
+	}
+	if platform == nil {
+		platform = platforms.Default()
+	}
+	configDesc, err := img.Config(ctx, c.content, platform)
 	if err != nil {
 		return fmt.Errorf("get image id: %w", err)
 	}
 	id := imagestore.Name(configDesc.Digest.String(), handler)
-	if err := c.createOrUpdateImageReference(ctx, id, img.Target(), criLabels); err != nil {
-		return fmt.Errorf("create image id reference %q: %w", id, err)
-	}
-	if err := c.imageStore.UpdateWithPlatform(ctx, id, platform); err != nil {
-		return fmt.Errorf("update image store for %q: %w", id, err)
-	}
-	if err := c.createOrUpdateImageReference(ctx, r, img.Target(), criLabels); err != nil {
-		return fmt.Errorf("create managed label: %w", err)
+	if id != r {
+		if err := c.createOrUpdateImageReference(ctx, id, img.Target, img.Labels); err != nil {
+			return fmt.Errorf("create image id reference %q: %w", id, err)
+		}
+		if err := c.imageStore.UpdateWithPlatform(ctx, id, platform); err != nil {
+			return fmt.Errorf("update image store for %q: %w", id, err)
+		}
 	}
 	if err := c.imageStore.UpdateWithPlatform(ctx, r, platform); err != nil {
 		return fmt.Errorf("update image store for %q: %w", r, err)

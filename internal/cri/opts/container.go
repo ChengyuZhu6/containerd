@@ -26,7 +26,6 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/containerd/platforms"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/semaphore"
 
@@ -66,7 +65,7 @@ func unpackImage(ctx context.Context, client *containerd.Client, i containerd.Im
 	}
 	defer done(ctx)
 
-	matcher := platforms.Default()
+	matcher := i.Platform()
 
 	capabilities, err := client.GetSnapshotterCapabilities(ctx, snapshotter)
 	if err != nil {

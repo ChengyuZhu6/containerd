@@ -19,6 +19,7 @@ package images
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -74,7 +75,8 @@ type CRIImageService struct {
 	config criconfig.ImageConfig
 	// images is the lower level image store used for raw storage,
 	// no event publishing should currently be assumed
-	images images.Store
+	images  images.Store
+	content content.Provider
 	// client is a subset of the containerd client
 	// and will be replaced by image store and transfer service
 	client imageClient
@@ -96,6 +98,8 @@ type CRIImageService struct {
 	// or chain ID.
 	unpackDuplicationSuppressor kmutex.KeyedLocker
 	imageMutationLocker         kmutex.KeyedLocker
+	// imageLifecycleMutex excludes deletion while other handlers publish shared resources.
+	imageLifecycleMutex sync.RWMutex
 
 	// downloadLimiter is used to limit the number of concurrent downloads.
 	downloadLimiter *semaphore.Weighted
@@ -145,6 +149,7 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 	svc := CRIImageService{
 		config:                      config,
 		images:                      options.Images,
+		content:                     options.Content,
 		client:                      &platformImageClient{Client: options.Client},
 		imageStore:                  imagestore.NewStore(options.Images, options.Content, platforms.Default()),
 		imageFSPaths:                options.ImageFSPaths,

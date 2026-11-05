@@ -21,11 +21,34 @@ import (
 	"os"
 	"testing"
 
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSandboxImageReference(t *testing.T) {
+	const digest = "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, handler := range []string{"runc", "a"} {
+		for _, test := range []struct{ input, normalized string }{
+			{"pause", "docker.io/library/pause:latest"},
+			{"registry.k8s.io/pause:3.10@" + digest, "registry.k8s.io/pause@" + digest},
+		} {
+			t.Run(handler+"/"+test.input, func(t *testing.T) {
+				name, err := sandboxImageReference(test.input, handler, "runc")
+				require.NoError(t, err)
+				if handler == "runc" {
+					assert.Equal(t, test.normalized, name)
+				} else {
+					assert.Equal(t, imagestore.Name(test.normalized, handler), name)
+				}
+			})
+		}
+	}
+	_, err := sandboxImageReference("INVALID!!!", "a", "runc")
+	require.Error(t, err)
+}
 
 func TestEnvDeduplication(t *testing.T) {
 	for _, test := range []struct {

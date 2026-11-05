@@ -38,7 +38,6 @@ import (
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
 	customopts "github.com/containerd/containerd/v2/internal/cri/opts"
 	"github.com/containerd/containerd/v2/internal/cri/server/podsandbox/types"
-	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
 	ctrdutil "github.com/containerd/containerd/v2/internal/cri/util"
 	containerdio "github.com/containerd/containerd/v2/pkg/cio"
@@ -97,13 +96,26 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if len(image.References) == 0 {
 		return cin, fmt.Errorf("invalid sandbox image with no reference %q", image.ID)
 	}
-	name := sandboxImage
-	if runtimeHandler != c.config.DefaultRuntimeName {
-		name = imagestore.Name(name, runtimeHandler)
-	}
-	pauseImage, err := c.client.GetImage(ctx, name)
+	name, err := sandboxImageReference(sandboxImage, runtimeHandler, c.config.DefaultRuntimeName)
 	if err != nil {
-		return cin, fmt.Errorf("failed to get sandbox image %q: %w", sandboxImage, err)
+		return cin, fmt.Errorf("failed to normalize sandbox image %q: %w", sandboxImage, err)
+	}
+	var pauseImage containerd.Image
+	for _, candidate := range append([]string{name}, image.References...) {
+		img, getErr := c.client.ImageService().Get(ctx, candidate)
+		err = getErr
+		if err == nil {
+			pauseImage, err = customopts.ImageForConfig(ctx, c.client, img, image.ID)
+			if err == nil {
+				break
+			}
+		}
+		if !errdefs.IsNotFound(err) {
+			return cin, fmt.Errorf("failed to select sandbox image %q: %w", sandboxImage, err)
+		}
+	}
+	if err != nil {
+		return cin, fmt.Errorf("failed to select sandbox image %q: %w", sandboxImage, err)
 	}
 
 	// Get the image spec from containerd image

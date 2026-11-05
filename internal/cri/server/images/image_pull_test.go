@@ -21,6 +21,8 @@ import (
 	"encoding/base64"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -34,13 +36,18 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	ctrdimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/images/imagetest"
+	"github.com/containerd/containerd/v2/core/metadata"
 	"github.com/containerd/containerd/v2/core/transfer"
 	transferimage "github.com/containerd/containerd/v2/core/transfer/image"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/labels"
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/internal/kmutex"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestParseAuth(t *testing.T) {
@@ -594,6 +601,148 @@ func TestRuntimeHandlerPullBackends(t *testing.T) {
 	})
 }
 
+func newImageEventService(t *testing.T) (context.Context, *CRIImageService, imagetest.ContentStore) {
+	t.Helper()
+	ctx := namespaces.WithNamespace(context.Background(), "test")
+	cs := imagetest.NewContentStore(ctx, t)
+	db, err := bolt.Open(filepath.Join(t.TempDir(), "metadata.db"), 0o600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	store := metadata.NewImageStore(metadata.NewDB(db, cs.Store, nil))
+	client, err := containerd.New("", containerd.WithServices(containerd.WithImageStore(store), containerd.WithContentStore(cs.Store)))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, client.Close()) })
+	return ctx, &CRIImageService{
+		images: store, content: cs.Store, client: &platformImageClient{client},
+		runtimePlatforms:    map[string]*ImagePlatform{"runc": {}},
+		imageStore:          imagestore.NewStore(store, cs.Store, platforms.Default()),
+		imageMutationLocker: kmutex.New(),
+	}, cs
+}
+
+type imageEventStore struct {
+	ctrdimages.Store
+	beforeUpdate func(context.Context)
+	updates      int
+}
+
+func (s *imageEventStore) Update(ctx context.Context, image ctrdimages.Image, fields ...string) (ctrdimages.Image, error) {
+	s.updates++
+	if s.beforeUpdate != nil {
+		before := s.beforeUpdate
+		s.beforeUpdate = nil
+		before(ctx)
+	}
+	return s.Store.Update(ctx, image, fields...)
+}
+
+func TestImageLifecycleMutationLocks(t *testing.T) {
+	ctx, c, cs := newImageEventService(t)
+	config := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platforms.DefaultSpec(), RootFS: ocispec.RootFS{Type: "layers"}})
+	manifest := cs.Manifest(config)
+	ref := "example.com/test:latest"
+	_, err := c.images.Create(ctx, ctrdimages.Image{Name: ref, Target: manifest.Descriptor})
+	require.NoError(t, err)
+	store := &imageEventStore{Store: c.images}
+	store.beforeUpdate = func(context.Context) {
+		locked := c.imageLifecycleMutex.TryLock()
+		if locked {
+			c.imageLifecycleMutex.Unlock()
+		}
+		assert.False(t, locked, "event publication must exclude deletion across handlers")
+	}
+	c.images = store
+	require.NoError(t, c.UpdateImage(ctx, ref))
+	c.imageLifecycleMutex.RLock()
+	finished := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		finished <- c.RemoveImage(ctx, &runtime.ImageSpec{Image: config.Descriptor.Digest.String(), RuntimeHandler: "runc"})
+	}()
+	<-started
+	select {
+	case err := <-finished:
+		c.imageLifecycleMutex.RUnlock()
+		t.Fatalf("different handler removal passed active publication: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	c.imageLifecycleMutex.RUnlock()
+	select {
+	case err := <-finished:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("removal remained blocked after publication completed")
+	}
+}
+
+func TestRemoveImageInvalidUnrelatedPlatform(t *testing.T) {
+	ctx, c, cs := newImageEventService(t)
+	config := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platforms.DefaultSpec(), RootFS: ocispec.RootFS{Type: "layers"}})
+	manifest := cs.Manifest(config)
+	ref := "example.com/test:latest"
+	_, err := c.images.Create(ctx, ctrdimages.Image{Name: ref, Target: manifest.Descriptor})
+	require.NoError(t, err)
+	require.NoError(t, c.UpdateImage(ctx, ref))
+	_, err = c.images.Create(ctx, ctrdimages.Image{Name: "example.com/broken:latest", Target: manifest.Descriptor,
+		Labels: map[string]string{labels.ImagePlatformLabelKey: "invalid platform"}})
+	require.NoError(t, err)
+	require.NoError(t, c.RemoveImage(ctx, &runtime.ImageSpec{Image: config.Descriptor.Digest.String()}))
+	_, err = c.LocalResolve(ref, "")
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, err = c.images.Get(ctx, "example.com/broken:latest")
+	require.NoError(t, err)
+}
+
+func TestImageEventExternalMutation(t *testing.T) {
+	for _, handler := range []string{"", "runc"} {
+		for _, deleted := range []bool{false, true} {
+			t.Run(handler+"/delete="+strconv.FormatBool(deleted), func(t *testing.T) {
+				ctx, c, cs := newImageEventService(t)
+				platform := platforms.DefaultSpec()
+				oldConfig := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platform, RootFS: ocispec.RootFS{Type: "layers"}})
+				newConfig := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{Platform: platform, RootFS: ocispec.RootFS{Type: "layers"}, Config: ocispec.ImageConfig{Env: []string{"VERSION=new"}}})
+				oldManifest, newManifest := cs.Manifest(oldConfig), cs.Manifest(newConfig)
+				ref := imagestore.Name("example.com/test:latest", handler)
+				_, err := c.images.Create(ctx, ctrdimages.Image{Name: ref, Target: oldManifest.Descriptor, Labels: map[string]string{"external": "keep"}})
+				require.NoError(t, err)
+				store := &imageEventStore{Store: c.images}
+				store.beforeUpdate = func(ctx context.Context) {
+					if deleted {
+						require.NoError(t, store.Store.Delete(ctx, ref))
+					} else {
+						_, err := store.Store.Update(ctx, ctrdimages.Image{Name: ref, Target: newManifest.Descriptor}, "target")
+						require.NoError(t, err)
+					}
+				}
+				c.images = store
+				require.NoError(t, c.UpdateImage(ctx, ref))
+				if deleted {
+					_, err = store.Get(ctx, ref)
+					require.ErrorIs(t, err, errdefs.ErrNotFound)
+					assert.Empty(t, c.imageStore.List())
+					return
+				}
+				stored, err := store.Get(ctx, ref)
+				require.NoError(t, err)
+				assert.Equal(t, newManifest.Descriptor, stored.Target)
+				assert.Equal(t, "keep", stored.Labels["external"])
+				resolved, err := c.LocalResolve("example.com/test:latest", handler)
+				require.NoError(t, err)
+				assert.Equal(t, newConfig.Descriptor.Digest.String(), resolved.ID)
+				assert.Equal(t, handler, resolved.RuntimeHandler)
+				updates := store.updates
+				require.NoError(t, c.UpdateImage(ctx, ref))
+				assert.Equal(t, updates, store.updates, "unchanged events must not publish another update")
+				require.NoError(t, store.Delete(ctx, ref))
+				require.NoError(t, c.UpdateImage(ctx, ref))
+				_, err = c.LocalResolve("example.com/test:latest", handler)
+				assert.ErrorIs(t, err, errdefs.ErrNotFound)
+			})
+		}
+	}
+}
+
 func TestPersistedImagePlatform(t *testing.T) {
 	platform := ocispec.Platform{
 		OS:           "windows",
@@ -608,17 +757,29 @@ func TestPersistedImagePlatform(t *testing.T) {
 	})
 
 	t.Run("event update", func(t *testing.T) {
-		client := &pullTestClient{
-			getImage: func(context.Context, string) (containerd.Image, error) {
-				return image, nil
-			},
-			getImageWithPlatform: func(_ context.Context, _ string, matcher platforms.MatchComparer) (containerd.Image, error) {
-				require.True(t, matcher.Match(platform))
-				return nil, errdefs.ErrUnavailable
-			},
-		}
-		c := &CRIImageService{client: client, imageMutationLocker: kmutex.New()}
-		require.ErrorIs(t, c.UpdateImage(context.Background(), ref), errdefs.ErrUnavailable)
+		ctx, c, cs := newImageEventService(t)
+		config := cs.JSONObject(ocispec.MediaTypeImageConfig, ocispec.Image{
+			Platform: platform,
+			RootFS:   ocispec.RootFS{Type: "layers"},
+		})
+		manifest := cs.Manifest(config)
+		_, err := c.images.Create(ctx, ctrdimages.Image{Name: ref, Target: manifest.Descriptor,
+			Labels: map[string]string{labels.ImagePlatformLabelKey: platforms.FormatAll(platform)}})
+		require.NoError(t, err)
+		require.NoError(t, c.UpdateImage(ctx, ref))
+		got, err := c.LocalResolve(ref, "")
+		require.NoError(t, err)
+		assert.Equal(t, config.Descriptor.Digest.String(), got.ID)
+		assert.Equal(t, platform, got.ImageSpec.Platform)
+		assert.Equal(t, []string{ref}, func() []string {
+			var refs []string
+			for _, ref := range got.References {
+				if ref != got.ID {
+					refs = append(refs, ref)
+				}
+			}
+			return refs
+		}())
 	})
 
 	t.Run("recovery", func(t *testing.T) {

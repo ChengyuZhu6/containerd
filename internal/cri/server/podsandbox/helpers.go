@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"path/filepath"
 
+	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/typeurl/v2"
+	"github.com/distribution/reference"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -33,6 +35,17 @@ import (
 	ctrdutil "github.com/containerd/containerd/v2/internal/cri/util"
 	"github.com/containerd/containerd/v2/pkg/oci"
 )
+
+func sandboxImageReference(name, handler, defaultHandler string) (string, error) {
+	ref, err := reference.ParseDockerRef(name)
+	if err != nil {
+		return "", err
+	}
+	if handler == defaultHandler {
+		handler = ""
+	}
+	return imagestore.Name(ref.String(), handler), nil
+}
 
 const (
 
